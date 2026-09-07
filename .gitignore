@@ -1,0 +1,36 @@
+# ---- 编译产物 ----
+target/
+**/target/
+*.exe
+*.pdb
+*.rlib
+*.rmeta
+*.d
+*.lib
+*.apk
+
+# ---- 发布目录（二进制不入 git，走 GitHub Release） ----
+release/
+
+# ---- 第三方克隆 ----
+vendors/
+
+# ---- 工作区内部数据 ----
+.workbuddy/
+
+# ---- 日志与临时 ----
+*.log
+run_err.log
+run_out.log
+stderr.log
+stdout.log
+
+# ---- 系统文件 ----
+Thumbs.db
+Desktop.ini
+.DS_Store
+
+# ---- demo 测试产物 ----
+demo/received_test*.bin
+demo/iroh-transfer/recv_log*.txt
+release 产物残留

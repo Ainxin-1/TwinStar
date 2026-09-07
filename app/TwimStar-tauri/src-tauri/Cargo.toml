@@ -1,0 +1,20 @@
+[package]
+name = "twimstar"
+version = "0.6.0"
+description = "TwimStar — 零成本互传"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+iroh = "1.1.0"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+rfd = "0.17"
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

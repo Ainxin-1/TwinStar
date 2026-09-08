@@ -16,13 +16,17 @@
         <div class="subtitle">零成本互传 · 免 VPN · 无需账号</div>
       </div>
     </div>
-    <span id="net-pill" class="pill pill-blue">● 初始化中</span>
+    <div class="card-actions">
+      <span id="net-pill" class="pill pill-blue">● 初始化中</span>
+      <span id="conn-pill" class="pill pill-gray hidden">通路待定</span>
+    </div>
   </header>
 
   <!-- 标签页 -->
   <nav class="tabs">
     <button class="tab active" data-tab="transfer">传输</button>
     <button class="tab" data-tab="logs">活动日志</button>
+    <button class="tab" data-tab="net">网络</button>
   </nav>
 
   <!-- 内容 -->
@@ -46,10 +50,14 @@
         </div>
         <label class="field-label">对方连接码</label>
         <input id="peer-id" class="text-input" type="text" placeholder="粘贴对方的 64 位连接码" spellcheck="false" />
-        <button id="btn-send" class="btn btn-primary btn-lg" disabled>发 送</button>
+        <div class="btn-row">
+          <button id="btn-send" class="btn btn-primary btn-lg" disabled>发 送</button>
+          <button id="btn-cancel" class="btn btn-ghost btn-lg hidden">取消</button>
+        </div>
         <div id="send-progress" class="progress-wrap hidden">
           <div id="send-bar" class="progress-bar" style="width:0%"></div>
         </div>
+        <div id="send-meta" class="progress-meta hidden"></div>
         <div id="send-result" class="result hidden"></div>
       </div>
 
@@ -65,6 +73,10 @@
         <div class="recv-row">
           <span id="recv-status" class="recv-status">等待对方连接…</span>
         </div>
+        <div id="recv-progress" class="progress-wrap hidden">
+          <div id="recv-bar" class="progress-bar" style="width:0%"></div>
+        </div>
+        <div id="recv-meta" class="progress-meta hidden"></div>
       </div>
     </section>
 
@@ -81,6 +93,28 @@
         <div id="log-list" class="log-list"></div>
       </div>
     </section>
+
+    <!-- 网络页 -->
+    <section id="page-net" class="page hidden">
+      <div class="card">
+        <div class="card-row">
+          <div class="card-title">网络自检</div>
+          <button id="btn-diag" class="btn btn-ghost btn-sm">重新检测</button>
+        </div>
+        <div id="diag-lead" class="diag-lead">正在检测网络环境…</div>
+        <div id="diag-advice" class="diag-advice"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">连通性</div>
+        <div id="diag-grid" class="kv-grid"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">中继延迟</div>
+        <div id="diag-relays" class="kv-grid"></div>
+      </div>
+    </section>
   </main>
 
   <!-- 状态栏 -->
@@ -89,7 +123,7 @@
       <span id="status-dot" class="dot dot-gray"></span>
       <span id="status-text">正在建立网络…</span>
     </div>
-    <span class="version">v0.6</span>
+    <span class="version">v0.8</span>
   </footer>
 
   <script src="app.js"></script>

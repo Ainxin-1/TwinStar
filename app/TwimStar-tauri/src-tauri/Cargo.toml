@@ -1,6 +1,6 @@
 [package]
 name = "twimstar"
-version = "0.6.0"
+version = "0.8.0"
 description = "TwimStar — 零成本互传"
 edition = "2021"
 
@@ -11,10 +11,25 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-iroh = "1.1.0"
+# unstable-net-report：拿 net_report 的 UDP/NAT 探测结果做网络自检
+iroh = { version = "1.1.0", features = ["unstable-net-report"] }
 tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 rfd = "0.17"
+
+# ---- 密码学（自 TwinStar v4 移植：认证 / 协商 / 加密三种角色分离）----
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
+sha2 = "0.10"
+hmac = "0.12"
+hkdf = "0.12"
+aes-gcm = "0.10"
+pbkdf2 = "0.12"
+subtle = "2"
+hex = "0.4"
+dirs = "5"
+base64 = "0.22"
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]

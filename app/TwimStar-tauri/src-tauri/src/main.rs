@@ -1,27 +1,53 @@
-//! TwimStar v0.6 — Tauri 2 版（WebView2 UI + iroh 网络层）
+//! TwimStar v0.8 — Tauri 2 版（WebView2 UI + iroh QUIC 网络层）
+//!
+//! 分层：
+//!   - [`core`]     纯逻辑层（自 TwinStar v4.0.1 移植）：路径安全 / 密码学 / 设备身份 / 帧格式
+//!   - [`net`]      网络层：打洞参数调优 / 通路判定 / 网络环境自检
+//!   - [`transfer`] 传输层：iroh QUIC + 断点续传 + 落盘完整性校验
+//!   - 本文件       Tauri 命令与事件桥接，只做"把进度和通路转发给 UI"
+//!
 //! 局域网直连 / 跨网打洞 / 中继兜底，全程零服务器零账号。
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use anyhow::Result;
-use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets};
-use serde::Serialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::Instant;
-use tauri::{AppHandle, Emitter};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use std::time::{Duration, Instant};
 
-const ALPN: &[u8] = b"twimstar/demo/1";
-const CHUNK: usize = 256 * 1024;
+use anyhow::Result;
+use iroh::{Endpoint, EndpointId};
+use serde::Serialize;
+use tauri::{AppHandle, Emitter};
+
+use crate::core::identity::DeviceIdentity;
+use crate::core::path::format_size;
+use crate::net::ALPN;
+use crate::transfer::SendOptions;
+
+mod core;
+mod net;
+mod transfer;
+
+/// 进度事件节流间隔：QUIC 每 1MiB 一个回调，全量转发会把 WebView 刷爆。
+const PROGRESS_THROTTLE: Duration = Duration::from_millis(60);
+
+/// 小于这个体积就不值得等打洞了 —— 等待的时间比传输本身还长。
+const WORTH_WAITING_SIZE: u64 = 2 * 1024 * 1024;
 
 // ---------------- 全局状态 ----------------
 
 static SAVE_DIR: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
 static ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
+/// 取消标志。UI 同一时刻只有一个传输在跑，一把全局开关足够。
+static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 
 fn save_dir() -> Arc<Mutex<String>> {
     SAVE_DIR.get().unwrap().clone()
+}
+
+fn cancel_flag() -> Arc<AtomicBool> {
+    CANCEL.get_or_init(|| Arc::new(AtomicBool::new(false))).clone()
 }
 
 fn default_save_dir() -> String {
@@ -32,124 +58,230 @@ fn default_save_dir() -> String {
 
 // ---------------- 网络层 ----------------
 
-fn human_size(n: u64) -> String {
-    let n = n as f64;
-    if n >= 1_073_741_824.0 { format!("{:.2} GB", n / 1_073_741_824.0) }
-    else if n >= 1_048_576.0 { format!("{:.2} MB", n / 1_048_576.0) }
-    else if n >= 1024.0 { format!("{:.1} KB", n / 1024.0) }
-    else { format!("{n} B") }
+/// 端点密钥由设备身份派生，因此"我的连接码"跨重启固定。
+async fn build_endpoint() -> Result<Endpoint> {
+    let seed = DeviceIdentity::load_or_create().derive_endpoint_seed();
+    net::build_endpoint(seed).await
 }
 
-async fn build_endpoint() -> Result<Endpoint> {
-    Ok(Endpoint::builder(presets::N0)
-        .secret_key(SecretKey::generate())
-        .alpns(vec![ALPN.to_vec()])
-        .relay_mode(RelayMode::Default)
-        .bind()
-        .await?)
-}
+// ---------------- 事件载荷 ----------------
 
 #[derive(Serialize, Clone)]
-struct RecvProgress {
+struct ProgressView {
     name: String,
+    pct: f32,
+    sent: u64,
+    total: u64,
+    /// 字节/秒
+    speed: u64,
+    /// 预计剩余秒数
+    eta: u32,
 }
 
-async fn send_file(app: AppHandle, id: EndpointId, path: PathBuf, endpoint: Endpoint) {
+/// 滑动窗口速率表：取最近 800ms 的斜率，比"总量/总时长"更能反映当下网速。
+struct Meter {
+    samples: std::collections::VecDeque<(Instant, u64)>,
+}
+
+impl Meter {
+    fn new() -> Self {
+        Self { samples: std::collections::VecDeque::with_capacity(64) }
+    }
+
+    fn update(&mut self, done: u64) -> f64 {
+        let now = Instant::now();
+        self.samples.push_back((now, done));
+        while self.samples.len() > 2
+            && now.duration_since(self.samples.front().unwrap().0) > Duration::from_millis(800)
+        {
+            self.samples.pop_front();
+        }
+        let Some((t0, b0)) = self.samples.front().copied() else {
+            return 0.0;
+        };
+        let dt = now.duration_since(t0).as_secs_f64();
+        if dt < 0.05 {
+            return 0.0;
+        }
+        ((done - b0) as f64 / dt).max(0.0)
+    }
+}
+
+/// 节流器：只在间隔到达或收尾时放行一次。
+struct Throttle {
+    last: Instant,
+}
+
+impl Throttle {
+    fn new() -> Self {
+        Self { last: Instant::now() }
+    }
+    fn ready(&mut self, force: bool) -> bool {
+        if force || self.last.elapsed() >= PROGRESS_THROTTLE {
+            self.last = Instant::now();
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn pct(done: u64, total: u64) -> f32 {
+    if total == 0 {
+        return 100.0;
+    }
+    ((done as f32 / total as f32) * 1000.0).round() / 10.0
+}
+
+fn eta_secs(sent: u64, total: u64, speed: f64) -> u32 {
+    if speed < 1024.0 || sent >= total {
+        return 0;
+    }
+    ((total - sent) as f64 / speed).ceil().min(99_999.0) as u32
+}
+
+// ---------------- 发送 / 接收 ----------------
+
+/// 发送包装：拨号 → 判定通路 → [`transfer::send_on_conn`]，把进度转成 UI 事件。
+async fn do_send(app: AppHandle, endpoint: Endpoint, id: EndpointId, path: PathBuf) {
     let name = path
         .file_name()
         .map(|s| s.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".into());
-    let result: Result<String> = async {
-        let total = tokio::fs::metadata(&path).await?.len();
-        let mut file = tokio::fs::File::open(&path).await?;
-        let t0 = Instant::now();
-        let conn = endpoint.connect(id, ALPN).await?;
-        let connect_ms = t0.elapsed().as_millis();
-        let (mut send, mut recv) = conn.open_bi().await?;
-        let name_bytes = name.as_bytes();
-        send.write_all(&(name_bytes.len() as u32).to_le_bytes()).await?;
-        send.write_all(name_bytes).await?;
-        let mut sent: u64 = 0;
-        let mut buf = vec![0u8; CHUNK];
-        loop {
-            let n = file.read(&mut buf).await?;
-            if n == 0 { break; }
-            send.write_all(&buf[..n]).await?;
-            sent += n as u64;
-            let pct = (sent as f32 / total as f32 * 1000.0).round() / 10.0;
-            let _ = app.emit("send-progress", pct);
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+    let flag = cancel_flag();
+    flag.store(false, Ordering::Relaxed);
+    let opts = SendOptions {
+        wait_direct: if size >= WORTH_WAITING_SIZE {
+            net::DEFAULT_WAIT_DIRECT
+        } else {
+            Duration::ZERO
+        },
+        cancel: Some(flag.clone()),
+    };
+
+    let t0 = Instant::now();
+    let conn = match net::connect_peer(&endpoint, id.into(), ALPN, opts.wait_direct).await {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = app.emit("send-done", "");
+            let _ = app.emit("log", format!("❌ 发送失败：{e:#}"));
+            return;
         }
-        send.shutdown().await?;
-        let ack = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            recv.read_to_end(16),
-        )
-        .await;
-        let elapsed = t0.elapsed();
-        let speed = human_size((total as f64 / elapsed.as_secs_f64().max(1e-9)) as u64);
-        let ack_note = match ack {
-            Ok(Ok(b)) if b == b"OK" => "对方已确认".to_string(),
-            _ => "数据已全部送达（确认包未收到）".to_string(),
-        };
-        Ok(format!(
-            "✅ 发送完成: {name} ({}) / 连接 {connect_ms}ms / 传输 {:.1?} / {speed}/s / {ack_note}",
-            human_size(total),
-            elapsed
-        ))
+    };
+
+    let view = net::describe(&conn);
+    let _ = app.emit("conn-info", &view);
+    let _ = app.emit(
+        "log",
+        format!("🔗 通路：{} {}（RTT {} ms）", view.label, view.detail, view.rtt_ms),
+    );
+    if view.kind != net::PathKind::Direct && opts.wait_direct.is_zero() {
+        let _ = app.emit("log", "ℹ️ 正在后台尝试打洞，成功会自动切到直连");
     }
+
+    let mut meter = Meter::new();
+    let mut th = Throttle::new();
+    let app2 = app.clone();
+    let name_for_cb = name.clone();
+
+    let outcome = transfer::send_on_conn(&conn, &path, &opts, move |sent, total| {
+        let speed = meter.update(sent);
+        if th.ready(sent >= total) {
+            let _ = app2.emit(
+                "send-progress",
+                ProgressView {
+                    name: name_for_cb.clone(),
+                    pct: pct(sent, total),
+                    sent,
+                    total,
+                    speed: speed as u64,
+                    eta: eta_secs(sent, total, speed),
+                },
+            );
+        }
+    })
     .await;
-    match result {
+
+    // 传完再看一眼通路：可能已经从"中继起步"升级成"直连"。
+    let final_view = net::describe(&conn);
+    let _ = app.emit("conn-info", &final_view);
+
+    match outcome {
         Ok(msg) => {
-            let _ = app.emit("send-done", &msg);
+            let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
+            let speed = format_size((size as f64 / elapsed) as u64);
+            let text = format!(
+                "✅ 发送完成：{name}（{}）/ 耗时 {:.1?} / {speed}/s / {}\n通路：{} {}",
+                format_size(size),
+                t0.elapsed(),
+                msg,
+                final_view.label,
+                final_view.detail
+            );
+            let _ = app.emit("send-done", &text);
+            let _ = app.emit("log", &text);
         }
         Err(e) => {
             let _ = app.emit("send-done", "");
-            let _ = app.emit("log", format!("❌ 发送失败: {e:#}"));
+            let _ = app.emit("log", format!("❌ 发送失败：{e:#}"));
         }
     }
 }
 
-async fn handle_incoming(app: AppHandle, conn: iroh::endpoint::Connection) {
-    let result: Result<String> = async {
-        let (mut send, mut recv) = conn.accept_bi().await?;
-        let mut len_buf = [0u8; 4];
-        recv.read_exact(&mut len_buf).await?;
-        let name_len = u32::from_le_bytes(len_buf) as usize;
-        let mut name_buf = vec![0u8; name_len];
-        recv.read_exact(&mut name_buf).await?;
-        let name = String::from_utf8_lossy(&name_buf).to_string();
-        let _ = app.emit("recv-progress", RecvProgress { name: name.clone() });
-        let dir = save_dir().lock().unwrap().clone();
-        let out_path = PathBuf::from(&dir).join(&name);
-        let mut out = tokio::fs::File::create(&out_path).await?;
-        let mut received: u64 = 0;
-        let mut buf = vec![0u8; CHUNK];
-        let t0 = Instant::now();
-        loop {
-            let Some(n) = recv.read(&mut buf).await? else { break };
-            out.write_all(&buf[..n]).await?;
-            received += n as u64;
-        }
-        out.flush().await?;
-        send.write_all(b"OK").await?;
-        send.shutdown().await?;
-        let elapsed = t0.elapsed();
-        let speed = human_size((received as f64 / elapsed.as_secs_f64().max(1e-9)) as u64);
-        Ok(format!(
-            "📥 收到: {} ({}) -> {} / {:.1?} / {speed}/s",
-            name,
-            human_size(received),
-            out_path.display(),
-            elapsed
-        ))
-    }
+/// 接收包装：调 [`transfer::handle_incoming_with`]，把进度与结果转成 UI 事件。
+async fn do_recv(app: AppHandle, conn: iroh::endpoint::Connection, dir: PathBuf) {
+    let view = net::describe(&conn);
+    let _ = app.emit("conn-info", &view);
+
+    let mut th = Throttle::new();
+    let mut meter = Meter::new();
+    let mut started_at: Option<Instant> = None;
+    let app2 = app.clone();
+    let flag = cancel_flag();
+    // 上一个任务可能留了取消标记，接收开始前先清掉。
+    flag.store(false, Ordering::Relaxed);
+
+    let outcome = transfer::handle_incoming_with(
+        conn,
+        Path::new(&dir),
+        Some(flag),
+        |name, got, total| {
+            if started_at.is_none() {
+                started_at = Some(Instant::now());
+            }
+            let speed = meter.update(got);
+            if th.ready(got >= total) {
+                let _ = app2.emit(
+                    "recv-progress",
+                    ProgressView {
+                        name: name.to_string(),
+                        pct: pct(got, total),
+                        sent: got,
+                        total,
+                        speed: speed as u64,
+                        eta: eta_secs(got, total, speed),
+                    },
+                );
+            }
+        },
+    )
     .await;
-    match result {
+
+    match outcome {
         Ok(msg) => {
-            let _ = app.emit("recv-done", &msg);
+            let note = match started_at {
+                Some(t) => format!(" / 耗时 {:.1?}", t.elapsed()),
+                None => String::new(),
+            };
+            let text = format!("📥 {msg}{note}");
+            let _ = app.emit("recv-done", &text);
+            let _ = app.emit("log", &text);
         }
         Err(e) => {
-            let _ = app.emit("log", format!("❌ 接收失败: {e:#}"));
+            let _ = app.emit("recv-done", "");
+            let _ = app.emit("log", format!("❌ 接收失败：{e:#}"));
         }
     }
 }
@@ -174,6 +306,11 @@ fn pick_folder() -> Option<String> {
 }
 
 #[tauri::command]
+fn get_save_dir() -> String {
+    save_dir().lock().unwrap().clone()
+}
+
+#[tauri::command]
 fn start_send(app: AppHandle, peer_id: String, path: String) -> Result<(), String> {
     let Some(endpoint) = ENDPOINT.get() else {
         return Err("网络尚未就绪，请稍候".to_string());
@@ -188,14 +325,26 @@ fn start_send(app: AppHandle, peer_id: String, path: String) -> Result<(), Strin
     }
     let endpoint = endpoint.clone();
     tauri::async_runtime::spawn(async move {
-        send_file(app, id, p, endpoint).await;
+        do_send(app, endpoint, id, p).await;
     });
     Ok(())
 }
 
+/// 取消当前传输。已落盘的部分会留在 `.part` 里，下次重发可续传。
 #[tauri::command]
-fn get_save_dir() -> String {
-    save_dir().lock().unwrap().clone()
+fn cancel_send() {
+    cancel_flag().store(true, Ordering::Relaxed);
+}
+
+/// 重新做一次网络自检，结果通过 `net-diag` 事件推给前端。
+#[tauri::command]
+fn refresh_diag(app: AppHandle) {
+    let Some(endpoint) = ENDPOINT.get() else { return };
+    let endpoint = endpoint.clone();
+    tauri::async_runtime::spawn(async move {
+        let diag = net::collect_diag(&endpoint).await;
+        let _ = app.emit("net-diag", diag);
+    });
 }
 
 // ---------------- 入口 ----------------
@@ -214,16 +363,26 @@ fn main() {
                             let id = endpoint.id().to_string();
                             let _ = ENDPOINT.set(endpoint.clone());
                             let _ = handle.emit("net-ready", &id);
+
+                            // 开局先做一次自检：UDP 通不通、能不能打洞，用户一眼能看到。
+                            let diag = net::collect_diag(&endpoint).await;
+                            let _ = handle.emit("log", format!("🩺 {}，{}", diag.verdict, diag.advice));
+                            let _ = handle.emit("net-diag", diag);
+
                             loop {
                                 let Some(incoming) = endpoint.accept().await else { break };
                                 let app2 = handle.clone();
+                                let dir = PathBuf::from(save_dir().lock().unwrap().clone());
                                 match incoming.accept() {
                                     Ok(accepting) => {
                                         tokio::spawn(async move {
                                             match accepting.await {
-                                                Ok(conn) => handle_incoming(app2, conn).await,
+                                                Ok(conn) => do_recv(app2, conn, dir).await,
                                                 Err(e) => {
-                                                    let _ = app2.emit("log", format!("连接失败: {e:#}"));
+                                                    let _ = app2.emit(
+                                                        "log",
+                                                        format!("连接失败：{e:#}"),
+                                                    );
                                                 }
                                             }
                                         });
@@ -233,7 +392,7 @@ fn main() {
                             }
                         }
                         Err(e) => {
-                            let _ = handle.emit("log", format!("网络初始化失败: {e:#}"));
+                            let _ = handle.emit("log", format!("网络初始化失败：{e:#}"));
                         }
                     }
                 });
@@ -244,6 +403,8 @@ fn main() {
             pick_file,
             pick_folder,
             start_send,
+            cancel_send,
+            refresh_diag,
             get_save_dir
         ])
         .run(tauri::generate_context!())

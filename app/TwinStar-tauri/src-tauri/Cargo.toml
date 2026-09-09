@@ -1,6 +1,6 @@
 [package]
 name = "twinstar"
-version = "0.10.0"
+version = "0.10.1"
 description = "TwinStar — 零成本互传"
 edition = "2021"
 

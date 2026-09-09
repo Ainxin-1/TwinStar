@@ -2,6 +2,9 @@
 
 零成本 P2P 文件传输软件 —— 局域网直连 / 跨网打洞 / 中继兜底，全程零服务器、零账号、免 VPN。
 
+**下载**：[TwimStar v0.8.0（Windows x64，22.7 MB）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.8.0/TwimStar-v0.8.0-win-x64.exe)
+SHA-256：`65380ab42d83857c4fe27099e16df6798c741bfb2b63854abf28cb35b66b3c66`
+
 ## 特性
 
 - **零成本**：不租服务器，使用 iroh 官方免费公共中继兜底

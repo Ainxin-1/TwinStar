@@ -1,6 +1,6 @@
 [package]
 name = "twimstar"
-version = "0.8.0"
+version = "0.9.0"
 description = "TwimStar — 零成本互传"
 edition = "2021"
 

@@ -9,6 +9,7 @@ const netPill = $("net-pill");
 const connPill = $("conn-pill");
 const myIdEl = $("my-id");
 const btnCopy = $("btn-copy");
+const btnCopyAddr = $("btn-copy-addr");
 const dropzone = $("dropzone");
 const dropzoneText = $("dropzone-text");
 const peerInput = $("peer-id");
@@ -23,6 +24,10 @@ const recvStatus = $("recv-status");
 const recvProgress = $("recv-progress");
 const recvBar = $("recv-bar");
 const recvMeta = $("recv-meta");
+const deviceList = $("device-list");
+const deviceEmpty = $("device-empty");
+const fileList = $("file-list");
+const fileEmpty = $("file-empty");
 const statusDot = $("status-dot");
 const statusText = $("status-text");
 const logList = $("log-list");
@@ -74,6 +79,7 @@ function setSendEnabled() {
   btnSend.disabled =
     sending || !selectedFile || peerInput.value.trim().length === 0 || !netReady;
   btnCopy.disabled = !myId;
+  btnCopyAddr.disabled = !myId;
 }
 
 function showResult(msg, ok) {
@@ -98,15 +104,16 @@ function idle() {
 }
 
 // ── Tab 切换 ──
+const PAGE_TABS = ["transfer", "devices", "files", "logs", "net"];
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((t) =>
+    t.classList.toggle("active", t.dataset.tab === name)
+  );
+  PAGE_TABS.forEach((n) => $("page-" + n).classList.toggle("hidden", n !== name));
+  if (name === "files") refreshFiles();
+}
 document.querySelectorAll(".tab").forEach((tab) => {
-  tab.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((t) => t.classList.remove("active"));
-    tab.classList.add("active");
-    const cur = tab.dataset.tab;
-    $("page-transfer").classList.toggle("hidden", cur !== "transfer");
-    $("page-logs").classList.toggle("hidden", cur !== "logs");
-    $("page-net").classList.toggle("hidden", cur !== "net");
-  });
+  tab.addEventListener("click", () => showTab(tab.dataset.tab));
 });
 
 // ── 网络就绪 ──
@@ -180,6 +187,7 @@ listen("recv-done", (e) => {
   recvBar.style.width = "0%";
   idle();
   if (e.payload) addLog(e.payload);
+  refreshFiles();
 });
 
 listen("log", (e) => {
@@ -261,6 +269,21 @@ myIdEl.addEventListener("click", async () => {
   if (myId) await navigator.clipboard.writeText(myId);
 });
 
+// 「带地址」的码：把本机可直连的地址一起给对方，跳过网络发现。
+// 跨网怎么都连不上时，这是最有效的一招。
+btnCopyAddr.addEventListener("click", async () => {
+  if (!myId) return;
+  try {
+    const code = await invoke("my_addr_code");
+    await navigator.clipboard.writeText(code);
+    btnCopyAddr.textContent = "已复制";
+    addLog("已复制带地址的连接码（对方粘贴后可跳过地址发现）");
+  } catch (e) {
+    addLog("复制带地址连接码失败：" + e);
+  }
+  setTimeout(() => (btnCopyAddr.textContent = "复制带地址"), 1200);
+});
+
 // ── 文件选择 ──
 dropzone.addEventListener("click", async () => {
   const path = await invoke("pick_file");
@@ -334,6 +357,148 @@ $("btn-folder").addEventListener("click", async () => {
 invoke("get_save_dir").then((dir) => {
   saveDirEl.textContent = "保存到 " + dir;
 });
+
+// ── 我的文件 ──
+function fmtTime(ms) {
+  if (!ms) return "";
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+async function refreshFiles() {
+  try {
+    const list = await invoke("list_files");
+    renderFiles(list || []);
+  } catch (err) {
+    renderFiles([]);
+  }
+}
+
+function renderFiles(list) {
+  fileList.innerHTML = "";
+  if (!list.length) {
+    fileEmpty.classList.remove("hidden");
+    return;
+  }
+  fileEmpty.classList.add("hidden");
+  for (const f of list) {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    const main = document.createElement("div");
+    main.className = "row-main";
+    const name = document.createElement("div");
+    name.className = "row-name";
+    name.textContent = f.name;
+    name.title = f.name; // 悬停显示完整文件名，避免 CSS 省略号把 .. 误看成 …
+    const sub = document.createElement("div");
+    sub.className = "row-sub";
+    sub.textContent = fmtSize(f.size) + " · " + fmtTime(f.modified);
+    main.appendChild(name);
+    main.appendChild(sub);
+    const actions = document.createElement("div");
+    actions.className = "row-actions";
+    const reveal = document.createElement("button");
+    reveal.className = "row-action sub";
+    reveal.textContent = "位置";
+    reveal.title = "在资源管理器中显示此文件";
+    reveal.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      try {
+        await invoke("reveal_file", { name: f.name });
+      } catch (e) {
+        addLog("打开位置失败：" + e);
+      }
+    });
+    const act = document.createElement("button");
+    act.className = "row-action";
+    act.textContent = "打开";
+    act.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      try {
+        await invoke("open_file", { name: f.name });
+      } catch (e) {
+        addLog("打开失败：" + e);
+      }
+    });
+    actions.appendChild(reveal);
+    actions.appendChild(act);
+    row.appendChild(main);
+    row.appendChild(actions);
+    row.addEventListener("click", async () => {
+      try {
+        await invoke("open_file", { name: f.name });
+      } catch (e) {
+        addLog("打开失败：" + e);
+      }
+    });
+    fileList.appendChild(row);
+  }
+}
+
+$("btn-open-folder").addEventListener("click", async () => {
+  try {
+    await invoke("open_folder");
+  } catch (e) {
+    addLog("打开文件夹失败：" + e);
+  }
+});
+$("btn-refresh-files").addEventListener("click", refreshFiles);
+
+// ── 局域网设备 ──
+function fillPeerAndSend(id) {
+  peerInput.value = id;
+  setSendEnabled();
+  showTab("transfer");
+  if (selectedFile) btnSend.focus();
+}
+
+function renderDevices(list) {
+  deviceList.innerHTML = "";
+  if (!list || !list.length) {
+    deviceEmpty.classList.remove("hidden");
+    return;
+  }
+  deviceEmpty.classList.add("hidden");
+  for (const p of list) {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    const main = document.createElement("div");
+    main.className = "row-main";
+    const name = document.createElement("div");
+    name.className = "row-name";
+    name.textContent = p.name || "未命名设备";
+    name.title = (p.name || "未命名设备") + "  ·  " + p.id; // 悬停显示设备名+ID 全貌
+    const sub = document.createElement("div");
+    sub.className = "row-sub";
+    sub.textContent =
+      p.id.slice(0, 8) + " … " + p.id.slice(-8) +
+      " · " + (p.routable ? "可直连" : "待发现") +
+      " · " + (p.ago_secs === 0 ? "刚刚" : p.ago_secs + " 秒前");
+    main.appendChild(name);
+    main.appendChild(sub);
+    const act = document.createElement("button");
+    act.className = "row-action";
+    // 带地址的设备能直接拨号，标记出来让用户知道这一下会秒连。
+    act.textContent = p.routable ? "⚡ 发送" : "发送";
+    act.addEventListener("click", (ev) => {
+      ev.stopPropagation();
+      fillPeerAndSend(p.code || p.id);
+    });
+    row.appendChild(main);
+    row.appendChild(act);
+    row.addEventListener("click", () => fillPeerAndSend(p.code || p.id));
+    deviceList.appendChild(row);
+  }
+}
+
+$("btn-refresh-devices").addEventListener("click", () => {
+  deviceEmpty.textContent = "正在搜索同网段的其他 TwimStar…";
+  deviceEmpty.classList.remove("hidden");
+  deviceList.innerHTML = "";
+});
+
+listen("devices", (e) => renderDevices(e.payload));
 
 // ── 日志清空 ──
 $("btn-clear").addEventListener("click", () => {

@@ -9,13 +9,17 @@
 
 use anyhow::{Context, Result};
 use iroh::{
-    Endpoint, EndpointAddr, RelayMode, SecretKey, Watcher,
+    Endpoint, EndpointAddr, EndpointId, RelayMode, SecretKey, TransportAddr, Watcher,
     endpoint::{presets, Connection, PortmapperConfig, QuicTransportConfig, VarInt},
     unstable_net_report::NetReport,
 };
 use serde::Serialize;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
+use std::os::windows::process::CommandExt;
 use std::time::{Duration, Instant};
+
+/// 拉起控制台程序（tasklist / ipconfig）时不弹黑框。
+const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 pub const ALPN: &[u8] = b"twimstar/1";
 
@@ -26,6 +30,11 @@ pub const DEFAULT_WAIT_DIRECT: Duration = Duration::from_millis(2500);
 /// 连接失败后的重试间隔：首次拨号常卡在地址发现（DNS/pkarr），
 /// 立刻重试一次的成本远低于让用户再点一次"发送"。
 const RETRY_DELAY: Duration = Duration::from_millis(600);
+
+/// 单次拨号超时。对方离线 / 连接码填错时，iroh 会一直挂在地址发现上，
+/// 不给上限的话用户只能干等。15 秒足够走完"中继 + 打洞"两轮尝试，
+/// 再长用户就会以为软件卡死了。
+pub const DIAL_TIMEOUT: Duration = Duration::from_secs(15);
 
 // ---------------------------------------------------------------- 端点构建
 
@@ -190,7 +199,133 @@ pub async fn wait_for_direct(conn: &Connection, timeout: Duration) -> bool {
     }
 }
 
+// ---------------------------------------------------------------- 连接码
+
+/// 解析对端连接码。
+///
+/// 两种写法都收：
+///   - `<64 位十六进制 id>`                 —— 纯身份，地址交给 iroh 去发现
+///   - `<id>@<ip:port>[,<ip:port>...]`      —— 连地址一起给，直连不依赖发现服务
+///
+/// 第二种是给国内网络留的兜底：iroh 的地址发现走 DNS pkarr，
+/// 在部分运营商 / 代理环境下会超时或返回空，带上地址后这一步直接跳过。
+pub fn parse_peer_code(input: &str) -> Result<(EndpointId, Vec<SocketAddr>)> {
+    let s = input.trim();
+    if s.is_empty() {
+        anyhow::bail!("连接码为空");
+    }
+    let (id_part, addr_part) = match s.split_once('@') {
+        Some((a, b)) => (a.trim(), Some(b.trim())),
+        None => (s, None),
+    };
+    let id: EndpointId = id_part
+        .parse()
+        .map_err(|_| anyhow::anyhow!("连接码格式不对（应为 64 位十六进制）"))?;
+
+    let mut addrs = Vec::new();
+    if let Some(part) = addr_part {
+        for piece in part.split(',') {
+            let piece = piece.trim();
+            if piece.is_empty() {
+                continue;
+            }
+            let addr: SocketAddr = piece
+                .parse()
+                .map_err(|_| anyhow::anyhow!("地址格式不对：{piece}（应为 ip:port）"))?;
+            addrs.push(addr);
+        }
+    }
+    Ok((id, addrs))
+}
+
+/// 把身份与已知地址拼成 `EndpointAddr`。没带地址时等价于 `id.into()`。
+pub fn endpoint_addr_of(id: EndpointId, addrs: &[SocketAddr]) -> EndpointAddr {
+    if addrs.is_empty() {
+        id.into()
+    } else {
+        EndpointAddr::from_parts(id, addrs.iter().copied().map(TransportAddr::Ip))
+    }
+}
+
+/// 生成"带地址的连接码"，供对方粘贴后直连。
+pub fn format_addr_code(id: EndpointId, addrs: &[SocketAddr]) -> String {
+    let list: Vec<String> = addrs.iter().map(|a| a.to_string()).collect();
+    if list.is_empty() {
+        id.to_string()
+    } else {
+        format!("{}@{}", id, list.join(","))
+    }
+}
+
+/// 最多把几个地址编进连接码。码是要给人粘贴的，太长反而容易粘错；
+/// 而且真机上往往有一堆 wintun / Hyper-V 虚拟网卡地址，全塞进去纯属噪音。
+const MAX_CODE_ADDRS: usize = 4;
+
+/// 地址"有用程度"排序键：越小越优先。
+///
+/// 公网地址最有用（跨网能直接到），其次是普通内网（同网段直连），
+/// 最后是其他（CGNAT 只在同运营商内可达，链路本地基本没用）。
+fn addr_rank(ip: &IpAddr) -> u8 {
+    match ip {
+        IpAddr::V4(v) => {
+            let o = v.octets();
+            if v.is_private() {
+                1
+            } else if o[0] == 100 && (o[1] & 0xC0) == 64 {
+                2 // CGNAT：只在同一运营商内可达
+            } else if o[0] == 169 && o[1] == 254 {
+                3 // 链路本地：拿不到 DHCP 时才会有，对外无用
+            } else {
+                0 // 公网
+            }
+        }
+        IpAddr::V6(v) => {
+            if v.segments()[0] & 0xfe80 == 0xfe80 {
+                3 // IPv6 链路本地
+            } else {
+                0
+            }
+        }
+    }
+}
+
+/// 本机可对外公布的 UDP 地址：按有用程度排序、去重、限量。
+///
+/// 过滤掉回环、未指定、链路本地——这些地址发出去只会让对方白试一次。
+pub fn publicable_addrs(endpoint: &Endpoint) -> Vec<SocketAddr> {
+    let mut out: Vec<SocketAddr> = endpoint
+        .addr()
+        .ip_addrs()
+        .copied()
+        .filter(|s| {
+            let ip = s.ip();
+            !ip.is_loopback() && !ip.is_unspecified() && addr_rank(&ip) != 3
+        })
+        .collect();
+    out.sort_by_key(|s| (addr_rank(&s.ip()), *s));
+    out.dedup();
+    out.truncate(MAX_CODE_ADDRS);
+    out
+}
+
 // ---------------------------------------------------------------- 拨号
+
+/// 拨一次号，超时算失败。
+async fn dial(
+    endpoint: &Endpoint,
+    addr: EndpointAddr,
+    alpn: &[u8],
+    timeout: Duration,
+) -> Result<Connection> {
+    match tokio::time::timeout(timeout, endpoint.connect(addr, alpn)).await {
+        Ok(r) => r.context("连接对方失败"),
+        // 措辞里保留"超时"二字：连接提示（connect_hint）靠它判断该给哪条建议。
+        Err(_) => Err(anyhow::anyhow!(
+            "拨号超时：{} 秒内没找到对方（对方可能离线，或连接码有误）",
+            timeout.as_secs()
+        )),
+    }
+}
 
 /// 拨号并尽量等到直连。
 ///
@@ -202,13 +337,11 @@ pub async fn connect_peer(
     alpn: &[u8],
     wait_direct: Duration,
 ) -> Result<Connection> {
-    let first = endpoint.connect(addr.clone(), alpn).await;
-    let conn = match first {
+    let conn = match dial(endpoint, addr.clone(), alpn, DIAL_TIMEOUT).await {
         Ok(c) => c,
         Err(e) => {
             tokio::time::sleep(RETRY_DELAY).await;
-            endpoint
-                .connect(addr, alpn)
+            dial(endpoint, addr, alpn, DIAL_TIMEOUT)
                 .await
                 .map_err(|retry| anyhow::anyhow!("连接对方失败：{retry}（首次尝试：{e}）"))?
         }
@@ -218,6 +351,36 @@ pub async fn connect_peer(
         wait_for_direct(&conn, wait_direct).await;
     }
     Ok(conn)
+}
+
+/// 连接失败时给用户的一句"接下来怎么办"。
+///
+/// 报错信息本身是给开发者看的（"no addressing information" 之类），用户看到只会更懵。
+/// 这里把最常见的几种失败翻成可执行的一步。
+pub fn connect_hint(err: &str, had_addrs: bool) -> &'static str {
+    let lower = err.to_lowercase();
+    if lower.contains("超时")
+        || lower.contains("没找到对方")
+        || lower.contains("timed out")
+        || lower.contains("timeout")
+    {
+        return if had_addrs {
+            "地址可能已过期（对方换了网络或重启过软件），让对方重新复制一次「带地址」的连接码。"
+        } else {
+            "对方可能没开 TwimStar。若确认已开，让对方点「复制带地址」把带直连地址的码发给你再试。"
+        };
+    }
+    if lower.contains("connection closed")
+        || lower.contains("refused")
+        || lower.contains("reset")
+        || lower.contains("closed")
+    {
+        return "对方程序可能正在退出或网络刚断，稍等几秒重试。";
+    }
+    if lower.contains("no addressing information") || lower.contains("address") {
+        return "找不到对方的地址。让对方点「复制带地址」把带直连地址的码发给你。";
+    }
+    ""
 }
 
 // ---------------------------------------------------------------- 环境自检
@@ -431,6 +594,7 @@ fn detect_vpn_tun() -> Option<String> {
 fn running_vpn_process() -> Option<String> {
     let out = std::process::Command::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     let text = String::from_utf8_lossy(&out.stdout).to_lowercase();
@@ -443,6 +607,7 @@ fn running_vpn_process() -> Option<String> {
 fn tun_adapter() -> Option<String> {
     let out = std::process::Command::new("ipconfig")
         .arg("/all")
+        .creation_flags(CREATE_NO_WINDOW)
         .output()
         .ok()?;
     // 中文 Windows 下 ipconfig 输出是 GBK，这里只匹配 ASCII 关键字，丢字符无所谓。
@@ -586,6 +751,93 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0)
+    }
+
+    const SAMPLE_ID: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn parses_plain_id_code() {
+        let (id, addrs) = parse_peer_code(SAMPLE_ID).expect("纯 id 应能解析");
+        assert_eq!(id.to_string(), SAMPLE_ID);
+        assert!(addrs.is_empty(), "不带 @ 时不应产生地址");
+    }
+
+    #[test]
+    fn parses_code_with_addresses() {
+        let (id, addrs) =
+            parse_peer_code(&format!("{SAMPLE_ID}@192.168.1.5:1234,100.74.2.3:9999")).unwrap();
+        assert_eq!(id.to_string(), SAMPLE_ID);
+        assert_eq!(addrs.len(), 2);
+        assert_eq!(addrs[0].to_string(), "192.168.1.5:1234");
+        assert_eq!(addrs[1].to_string(), "100.74.2.3:9999");
+    }
+
+    #[test]
+    fn addr_code_roundtrips() {
+        let id: EndpointId = SAMPLE_ID.parse().unwrap();
+        let addrs = ["10.0.0.7:5123".parse().unwrap()];
+        let code = format_addr_code(id, &addrs);
+        assert_eq!(code, format!("{SAMPLE_ID}@10.0.0.7:5123"));
+
+        let (back, back_addrs) = parse_peer_code(&code).unwrap();
+        assert_eq!(back, id);
+        assert_eq!(back_addrs, addrs.to_vec());
+        // 带地址的码必须真的把地址塞进 EndpointAddr，否则等于没带。
+        assert_eq!(endpoint_addr_of(back, &back_addrs).ip_addrs().count(), 1);
+        // 不带地址时退化为纯身份，行为与旧版一致。
+        assert_eq!(endpoint_addr_of(back, &[]).ip_addrs().count(), 0);
+    }
+
+    #[test]
+    fn rejects_bad_codes() {
+        assert!(parse_peer_code("").is_err());
+        assert!(parse_peer_code("not-an-id").is_err());
+        assert!(parse_peer_code(&format!("{SAMPLE_ID}@999.1.1.1:80")).is_err());
+        assert!(parse_peer_code(&format!("{SAMPLE_ID}@1.2.3.4")).is_err());
+    }
+
+    #[test]
+    fn publicable_addrs_prefers_global_and_caps_count() {
+        // 本机真实场景会同时出现：公网映射、内网、CGNAT、链路本地、回环、虚拟网卡。
+        // 公网必须排在最前，链路本地与回环要被剔除，总数要收敛。
+        let ranked = |list: &[&str]| {
+            let mut v: Vec<SocketAddr> = list.iter().map(|s| s.parse().unwrap()).collect();
+            let keep = |s: &SocketAddr| {
+                !s.ip().is_loopback() && !s.ip().is_unspecified() && addr_rank(&s.ip()) != 3
+            };
+            v.retain(keep);
+            v.sort_by_key(|s| (addr_rank(&s.ip()), *s));
+            v.iter().map(|s| s.to_string()).collect::<Vec<_>>()
+        };
+
+        let got = ranked(&[
+            "127.0.0.1:1",
+            "169.254.7.7:1",
+            "172.29.160.1:1",
+            "100.74.2.3:1",
+            "192.168.31.98:1",
+            "112.32.134.57:1",
+        ]);
+        assert_eq!(got[0], "112.32.134.57:1", "公网地址应排第一，实际 {got:?}");
+        assert!(!got.iter().any(|s| s.starts_with("169.254.")), "链路本地应剔除");
+        assert!(!got.iter().any(|s| s.starts_with("127.")), "回环应剔除");
+        assert_eq!(got.last().unwrap(), "100.74.2.3:1", "CGNAT 应排最后");
+        assert_eq!(addr_rank(&"112.32.134.57".parse().unwrap()), 0);
+        assert_eq!(addr_rank(&"192.168.1.1".parse().unwrap()), 1);
+        assert_eq!(addr_rank(&"100.64.0.1".parse().unwrap()), 2);
+        assert_eq!(addr_rank(&"169.254.1.1".parse().unwrap()), 3);
+    }
+
+    #[test]
+    fn connect_hint_is_actionable() {
+        // 超时 + 没带地址 → 引导去用带地址的码（这是国内连不上的头号原因）
+        let h = connect_hint("拨号超时：15 秒内没找到对方", false);
+        assert!(h.contains("复制带地址"), "实际提示：{h}");
+        // 超时但已经带过地址 → 说明地址陈旧，让对方重发
+        let h2 = connect_hint("timeout", true);
+        assert!(h2.contains("过期"), "实际提示：{h2}");
+        // 认不出来的错误不给废话
+        assert_eq!(connect_hint("some weird internal error", false), "");
     }
 
     #[test]

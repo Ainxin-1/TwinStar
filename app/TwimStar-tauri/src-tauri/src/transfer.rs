@@ -178,6 +178,8 @@ pub fn build_meta(path: &Path) -> Result<FileMeta> {
 /// `addr` 用 [`EndpointAddr`] 而非裸 EndpointId：除了身份，还可以直接携带
 /// 已知的对端地址（局域网 IP、中继 URL），省掉一次地址发现、也便于离线环境测试。
 /// 只有 EndpointId 时写 `id.into()` 即可。
+// 主要在集成测试中使用；非测试构建会报 dead_code，这里显式放行。
+#[allow(dead_code)]
 pub async fn send_file<F>(
     endpoint: &iroh::Endpoint,
     addr: EndpointAddr,
@@ -267,24 +269,99 @@ where
 
 // ---------------------------------------------------------------- 接收
 
-/// 接收一个入站流；`save_dir` 为下载根目录。
-pub async fn handle_incoming(
-    conn: Connection,
+/// 一个连接上连续空转多久就收工（秒）。
+///
+/// 打洞是有成本的：拨一次号要走地址发现、中继握手、UDP 穿透，慢的时候好几秒。
+/// 连着发第二个文件时重走一遍纯属浪费，所以接收侧传完后会继续守着这条连接，
+/// 撑到下一次发送到来；太久没动静再释放，免得白占资源。
+pub const SESSION_IDLE: Duration = Duration::from_secs(120);
+
+/// 接收一个文件（连接由调用方持有，可继续复用）。
+// 生产路径走 handle_session，这两个入口主要给测试与一次性场景用。
+#[allow(dead_code)]
+pub async fn handle_one(
+    conn: &Connection,
     save_dir: &Path,
+    cancel: Option<Arc<AtomicBool>>,
     on_progress: impl FnMut(&str, u64, u64),
 ) -> Result<String> {
-    handle_incoming_with(conn, save_dir, None, on_progress).await
+    let (send, recv) = conn.accept_bi().await.context("接受数据通道失败")?;
+    handle_stream(send, recv, save_dir, cancel, on_progress).await
 }
 
-/// 接收一个入站流；`cancel` 置位时中止（已落盘的 .part 保留，下次可续传）。
+/// 独立连接模式：收完一个文件就随连接一起释放（测试与一次性场景用）。
+#[allow(dead_code)]
 pub async fn handle_incoming_with(
     conn: Connection,
     save_dir: &Path,
     cancel: Option<Arc<AtomicBool>>,
+    on_progress: impl FnMut(&str, u64, u64),
+) -> Result<String> {
+    handle_one(&conn, save_dir, cancel, on_progress).await
+}
+
+/// 在同一条连接上连续接收多个文件，直到对端不再发或空闲超时。
+///
+/// 配合发送侧的连接复用，实现"一次打洞、多次传输"。
+/// 返回成功接收的文件数；一个都没收到时把首个错误抛出去。
+pub async fn handle_session(
+    conn: &Connection,
+    save_dir: &Path,
+    cancel: Option<Arc<AtomicBool>>,
+    on_progress: impl FnMut(&str, u64, u64),
+    on_file: impl FnMut(String),
+) -> Result<usize> {
+    handle_session_idle(conn, save_dir, SESSION_IDLE, cancel, on_progress, on_file).await
+}
+
+/// 与 [`handle_session`] 相同，但空闲时长可指定（测试用短超时，免得干等）。
+pub async fn handle_session_idle(
+    conn: &Connection,
+    save_dir: &Path,
+    idle: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+    mut on_progress: impl FnMut(&str, u64, u64),
+    mut on_file: impl FnMut(String),
+) -> Result<usize> {
+    let mut files = 0usize;
+    loop {
+        if cancel
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            if files == 0 {
+                anyhow::bail!("已取消接收");
+            }
+            break;
+        }
+        match tokio::time::timeout(idle, conn.accept_bi()).await {
+            Ok(Ok((send, recv))) => {
+                let msg =
+                    handle_stream(send, recv, save_dir, cancel.clone(), &mut on_progress).await?;
+                files += 1;
+                on_file(msg);
+            }
+            Ok(Err(e)) => {
+                if files == 0 {
+                    return Err(e).context("接受数据通道失败");
+                }
+                break; // 连接断了，已收的文件照算
+            }
+            Err(_) => break, // 空闲超时，正常收工
+        }
+    }
+    Ok(files)
+}
+
+/// 接收单个双向流：`元数据 → 回续传起点 → 收数据 → 校验 → 回执`。
+async fn handle_stream(
+    mut send: iroh::endpoint::SendStream,
+    mut recv: iroh::endpoint::RecvStream,
+    save_dir: &Path,
+    cancel: Option<Arc<AtomicBool>>,
     mut on_progress: impl FnMut(&str, u64, u64),
 ) -> Result<String> {
-    let (mut send, mut recv) = conn.accept_bi().await.context("接受数据通道失败")?;
-
     // 1) 元数据
     let mut len_buf = [0u8; 4];
     recv.read_exact(&mut len_buf).await?;
@@ -327,7 +404,27 @@ pub async fn handle_incoming_with(
     send.write_all(&resume.to_le_bytes()).await?;
     write_sidecar(&final_path, meta.size, &meta.fingerprint)?;
 
-    // 4) 收数据写入 .part
+    // 4) 收数据写入 .part，同时流式累计 SHA-256
+    //    —— 边收边算，收完即校验，避免落盘后再把整个文件重读一遍
+    //       （传 10GB 文件时那就是两次完整磁盘读取，I/O 直接翻倍）。
+    let mut hasher = Sha256::new();
+    if resume > 0 {
+        // 续传：先把已落盘的 .part 前 resume 字节喂进 hasher，
+        // 保证最终哈希覆盖的是"完整文件"，而不是只覆盖这一段的增量。
+        let mut seeded = 0u64;
+        let mut f = std::fs::File::open(&part).context("读取续传基线失败")?;
+        let mut sbuf = vec![0u8; CHUNK];
+        while seeded < resume {
+            let want = ((resume - seeded) as usize).min(CHUNK);
+            let n = std::io::Read::read(&mut f, &mut sbuf[..want])
+                .context("读取续传基线失败")?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&sbuf[..n]);
+            seeded += n as u64;
+        }
+    }
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .read(true)
@@ -354,6 +451,7 @@ pub async fn handle_incoming_with(
             anyhow::bail!("已取消接收");
         }
         file.write_all(&buf[..n]).await?;
+        hasher.update(&buf[..n]);
         received += n as u64;
         on_progress(&meta.name, received, meta.size);
     }
@@ -368,7 +466,8 @@ pub async fn handle_incoming_with(
         let _ = send.write_all(format!("ERR:大小不符 {}≠{}", received, meta.size).as_bytes()).await;
         anyhow::bail!("大小不符：收到 {} / 应为 {}", received, meta.size);
     }
-    let actual = sha256_file(&part).context("落盘校验失败")?;
+    // 流式哈希已经覆盖了全部收到字节（含续传基线），直接收口比较。
+    let actual = hex::encode(hasher.finalize());
     if actual != meta.sha256 {
         let _ = std::fs::remove_file(&part);
         let _ = send.write_all(format!("ERR:SHA256 不一致").as_bytes()).await;
@@ -484,7 +583,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let incoming = server.accept().await.unwrap();
             let conn = incoming.accept().unwrap().await.unwrap();
-            let r = handle_incoming(conn, &save_for_task, |_, _, _| {}).await;
+            let r = handle_incoming_with(conn, &save_for_task, None, |_, _, _| {}).await;
             // 见 handle_incoming 末尾的说明：ack 要靠连接驱动轮询才发出去，
             // 这里留一点时间再丢弃端点，否则发送方永远等不到 OK。
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -532,7 +631,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let incoming = server.accept().await.unwrap();
             let conn = incoming.accept().unwrap().await.unwrap();
-            let r = handle_incoming(conn, &save, |_, _, _| {}).await;
+            let r = handle_incoming_with(conn, &save, None, |_, _, _| {}).await;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             drop(server);
             r
@@ -549,6 +648,60 @@ mod tests {
             !sidecar_path(&final_path).exists(),
             "成功后 sidecar 应被清理"
         );
+    }
+
+    /// 一次打洞、连传两个文件：第二条必须走同一条连接，不再重新拨号。
+    ///
+    /// 这是"连接复用"的核心回归——如果哪天 handle_session 退化成只收一个就返回，
+    /// 第二个文件会静静丢掉，这个测试会挂。
+    #[tokio::test]
+    async fn session_receives_two_files_on_one_connection() {
+        let dir = scratch("session");
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, vec![7u8; 120_000]).unwrap();
+        std::fs::write(&b, vec![9u8; 80_000]).unwrap();
+
+        let (server, client) = endpoint_pair().await;
+        let addr = loopback_addr(&server);
+        let save = scratch("session-save");
+
+        let save_for_task = save.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.accept().unwrap().await.unwrap();
+            let r = handle_session_idle(
+                &conn,
+                &save_for_task,
+                std::time::Duration::from_secs(15),
+                None,
+                |_, _, _| {},
+                |_| {},
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(server);
+            r
+        });
+
+        // 两个文件走同一条连接：只拨号一次。
+        let conn = crate::net::connect_peer(&client, addr, TEST_ALPN, Duration::ZERO)
+            .await
+            .expect("应能连上");
+        send_on_conn(&conn, &a, &SendOptions::default(), |_, _| {})
+            .await
+            .expect("第一个文件应发送成功");
+        send_on_conn(&conn, &b, &SendOptions::default(), |_, _| {})
+            .await
+            .expect("第二个文件应发送成功");
+        // 关掉连接，让接收侧的等待立即结束，不必耗到空闲超时。
+        conn.close(0u32.into(), b"done");
+        drop(conn);
+
+        let got = server_task.await.unwrap().expect("接收会话应正常结束");
+        assert_eq!(got, 2, "一条连接上应收到 2 个文件，实际 {got}");
+        assert_eq!(std::fs::read(save.join("a.bin")).unwrap(), vec![7u8; 120_000]);
+        assert_eq!(std::fs::read(save.join("b.bin")).unwrap(), vec![9u8; 80_000]);
     }
 
     /// 损坏的半成品：sidecar 指纹对不上时必须丢弃重传，不能续在错误数据后面。
@@ -571,7 +724,7 @@ mod tests {
         let server_task = tokio::spawn(async move {
             let incoming = server.accept().await.unwrap();
             let conn = incoming.accept().unwrap().await.unwrap();
-            let r = handle_incoming(conn, &save2, |_, _, _| {}).await;
+            let r = handle_incoming_with(conn, &save2, None, |_, _, _| {}).await;
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             drop(server);
             r

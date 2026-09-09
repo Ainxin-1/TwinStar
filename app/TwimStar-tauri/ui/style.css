@@ -144,6 +144,12 @@ body { display: flex; flex-direction: column; }
 
 /* ── 输入 ── */
 .field-label { font-size: 11.5px; color: var(--muted); }
+.field-hint {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.6;
+  color: var(--muted);
+}
 .text-input {
   font-family: Consolas, monospace;
   font-size: 13px;
@@ -264,3 +270,52 @@ body { display: flex; flex-direction: column; }
 ::-webkit-scrollbar { width: 8px; }
 ::-webkit-scrollbar-thumb { background: #d5d9e0; border-radius: 4px; }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* ── 列表（设备 / 我的文件）── */
+.list { display: flex; flex-direction: column; gap: 8px; }
+.list-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--stroke);
+  border-radius: 9px;
+  background: var(--field);
+  cursor: pointer;
+  transition: border-color .12s, background .12s;
+}
+.list-row:hover { border-color: var(--primary); background: var(--pill-bg); }
+.row-main { flex: 1; min-width: 0; }
+.row-name {
+  font-size: 13.5px; font-weight: 600;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row-sub {
+  font-size: 11.5px; color: var(--muted);
+  font-family: Consolas, monospace;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.row-action {
+  flex: none;
+  border: none; cursor: pointer;
+  font-family: inherit;
+  font-size: 12.5px; font-weight: 600;
+  padding: 6px 12px;
+  border-radius: 7px;
+  background: var(--primary); color: #fff;
+}
+.row-action:hover { background: var(--primary-hover); }
+.row-action.sub {
+  background: var(--card);
+  color: var(--primary);
+  border: 1px solid var(--stroke);
+}
+.row-action.sub:hover { background: var(--pill-bg); border-color: var(--primary); }
+.row-actions { display: flex; gap: 6px; flex: none; }
+.empty-hint {
+  font-size: 12.5px; color: var(--muted);
+  padding: 14px 4px; text-align: center; line-height: 1.7;
+}
+.card-hint {
+  font-size: 12px; color: var(--muted);
+  line-height: 1.7;
+  background: var(--field);
+}

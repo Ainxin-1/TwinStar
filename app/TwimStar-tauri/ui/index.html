@@ -1,129 +1,164 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<html lang="zh-CN" data-page-node-id="BVFpCn7b9ZGe1QkFDWqWVi">
+<head data-page-node-id="5foKUZt9yyYe2azH0UVhVG">
+  <meta charset="UTF-8" data-page-node-id="ZC5oGWsyH0N4IcXfr9mGsl" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="3rAnS1ia5XruD8tAHjZWni" />
   <title>TwimStar — 零成本互传</title>
-  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="style.css" data-page-node-id="FA9ijctkBvh87vVZynUeOt" />
 </head>
-<body>
+<body data-page-node-id="JqaxHuaP9uSObp3nZHAyyB">
   <!-- 顶栏 -->
-  <header class="topbar">
-    <div class="brand">
-      <div class="logo">☄</div>
-      <div class="brand-text">
-        <div class="title">TwimStar</div>
-        <div class="subtitle">零成本互传 · 免 VPN · 无需账号</div>
+  <header class="topbar" data-page-node-id="K4dNqm4btDAc9hN0OuZNaR">
+    <div class="brand" data-page-node-id="0RFLtDSzYmGOI893W3iXD4">
+      <div class="logo" data-page-node-id="RuaC3WiNv1RZnvZeR3RBi8">☄</div>
+      <div class="brand-text" data-page-node-id="3s8V6FpCtCWx4oIeAB74oN">
+        <div class="title" data-page-node-id="2py64htS6nE0X177A7XKNr">TwimStar</div>
+        <div class="subtitle" data-page-node-id="ZouqrJA7Pc7kmUO2SPQ4wS">零成本互传 · 免 VPN · 无需账号</div>
       </div>
     </div>
-    <div class="card-actions">
-      <span id="net-pill" class="pill pill-blue">● 初始化中</span>
-      <span id="conn-pill" class="pill pill-gray hidden">通路待定</span>
+    <div class="card-actions" data-page-node-id="F9YSiQoDH8OTzWbPfnDTGZ">
+      <span id="net-pill" class="pill pill-blue" data-page-node-id="9tWkjZHOFmMAanJjOParn8">● 初始化中</span>
+      <span id="conn-pill" class="pill pill-gray hidden" data-page-node-id="2aEq3zu2fSTiGUrprQlfTs">通路待定</span>
     </div>
   </header>
 
   <!-- 标签页 -->
-  <nav class="tabs">
-    <button class="tab active" data-tab="transfer">传输</button>
-    <button class="tab" data-tab="logs">活动日志</button>
-    <button class="tab" data-tab="net">网络</button>
+  <nav class="tabs" data-page-node-id="3t4vdiEj27HuIizWPTjsmW">
+    <button class="tab active" data-tab="transfer" data-page-node-id="bux0UUHwCzJNCK18dWx4zp">传输</button>
+    <button class="tab" data-tab="devices" data-page-node-id="lRqGqoZnzDrKrb3GIZr7ct">设备</button>
+    <button class="tab" data-tab="files" data-page-node-id="79DJDV4Pm5O2DG4TE2ZAF9">我的文件</button>
+    <button class="tab" data-tab="logs" data-page-node-id="hL8Y98JuPdfI9PugKVP0sd">活动日志</button>
+    <button class="tab" data-tab="net" data-page-node-id="nXfL3FgJiSFbl1Tyn2hQoA">网络</button>
   </nav>
 
   <!-- 内容 -->
-  <main class="content">
+  <main class="content" data-page-node-id="xV0JBrRZ2qECoZDoYbIjPL">
     <!-- 传输页 -->
-    <section id="page-transfer" class="page">
-      <div class="card">
-        <div class="card-row">
-          <div class="card-title">我的连接码</div>
-          <div class="card-actions">
-            <span id="my-id" class="id-short" title="">— —</span>
-            <button id="btn-copy" class="btn btn-primary btn-sm" disabled>复制</button>
+    <section id="page-transfer" class="page" data-page-node-id="k8mcBo7AF5jsE6xU651Tfv">
+      <div class="card" data-page-node-id="OnqaChhiXup7Z47sAx6NME">
+        <div class="card-row" data-page-node-id="CFJg5OLm884IW75nvszrLh">
+          <div class="card-title" data-page-node-id="XUkmKdzFGRAOV6PPkTKBDW">我的连接码</div>
+          <div class="card-actions" data-page-node-id="FyLgEPmkuizguBRYqG9Lt4">
+            <span id="my-id" class="id-short" title="" data-page-node-id="D1SnPiPbDAWhOXzDro5iWs">— —</span>
+            <button id="btn-copy" class="btn btn-primary btn-sm" disabled data-page-node-id="hMXUXt93rguKQHggHpZMXf">复制</button>
+            <button id="btn-copy-addr" class="btn btn-ghost btn-sm" disabled title="把本机当前可直连的地址一起复制，对方粘贴后可跳过地址发现" data-page-node-id="hMXUXt93rguKQHggHpZMXg">复制带地址</button>
           </div>
         </div>
+        <div class="field-hint" data-page-node-id="FyLgEPmkuizguBRYqG9Lt5">普通码靠网络发现对方；跨网连不上时，双方都改用「带地址」的码再试一次。</div>
       </div>
 
-      <div class="card">
-        <div class="card-title">发送文件</div>
-        <div id="dropzone" class="dropzone">
-          <span id="dropzone-text">📂 把文件拖到这里，或点击选择</span>
+      <div class="card" data-page-node-id="LdRm7l2vuooDXQsYjCKBX5">
+        <div class="card-title" data-page-node-id="OoqKItKDXmerO9xNNfADAM">发送文件</div>
+        <div id="dropzone" class="dropzone" data-page-node-id="L8btDmGGcpB8npgdSbAyFr">
+          <span id="dropzone-text" data-page-node-id="qHkEBpnPyiEisObZ2Inquh">📂 把文件拖到这里，或点击选择</span>
         </div>
-        <label class="field-label">对方连接码</label>
-        <input id="peer-id" class="text-input" type="text" placeholder="粘贴对方的 64 位连接码" spellcheck="false" />
-        <div class="btn-row">
-          <button id="btn-send" class="btn btn-primary btn-lg" disabled>发 送</button>
-          <button id="btn-cancel" class="btn btn-ghost btn-lg hidden">取消</button>
+        <label class="field-label" data-page-node-id="8xjIi1d3UFjeNCm0EyA0ZA">对方连接码</label>
+        <input id="peer-id" class="text-input" type="text" placeholder="粘贴对方连接码（64 位 id，或 id@ip:port）" spellcheck="false" data-page-node-id="dxkm5HFCvoBCzrcaFumAEc" />
+        <div class="btn-row" data-page-node-id="M7CtDTSj1JRDMWKz0QfKXm">
+          <button id="btn-send" class="btn btn-primary btn-lg" disabled data-page-node-id="t4vfeh0ZlF6E5BGRF6vCX1">发 送</button>
+          <button id="btn-cancel" class="btn btn-ghost btn-lg hidden" data-page-node-id="9ompr9iryGtIHcEzvkEr7y">取消</button>
         </div>
-        <div id="send-progress" class="progress-wrap hidden">
-          <div id="send-bar" class="progress-bar" style="width:0%"></div>
+        <div id="send-progress" class="progress-wrap hidden" data-page-node-id="5UsSGBkEUM3yJESbt1oenx">
+          <div id="send-bar" class="progress-bar" style="width:0%" data-page-node-id="GDF0Ey1mugJcky0hOXscSN"></div>
         </div>
-        <div id="send-meta" class="progress-meta hidden"></div>
-        <div id="send-result" class="result hidden"></div>
+        <div id="send-meta" class="progress-meta hidden" data-page-node-id="YrzkTBtMeNsuOpekfGwbYG"></div>
+        <div id="send-result" class="result hidden" data-page-node-id="ZVhfMEqDvaHRN9UT05DDyD"></div>
       </div>
 
-      <div class="card">
-        <div class="card-row">
-          <div class="card-title">接收文件</div>
-          <span class="pill pill-blue">自动接收</span>
+      <div class="card" data-page-node-id="6gWiHPV9nQabwQTLahIJTQ">
+        <div class="card-row" data-page-node-id="jBzJaiZToCx3PE9bhj2m5r">
+          <div class="card-title" data-page-node-id="UKOA1gswiWYbR92ISlycaB">接收文件</div>
+          <span class="pill pill-blue" data-page-node-id="GfwR1dF6h1PEYwN2kHRw47">自动接收</span>
         </div>
-        <div class="save-row">
-          <span id="save-dir" class="save-dir">保存到 …</span>
-          <button id="btn-folder" class="btn btn-ghost btn-sm">更改</button>
+        <div class="save-row" data-page-node-id="3AtkDLwxeelXV0nTkNlTJN">
+          <span id="save-dir" class="save-dir" data-page-node-id="IUvxhH2cNo1YSdWHgKNQu3">保存到 …</span>
+          <button id="btn-folder" class="btn btn-ghost btn-sm" data-page-node-id="VvrEbLIYs4RMD6CBeBlvQ5">更改</button>
         </div>
-        <div class="recv-row">
-          <span id="recv-status" class="recv-status">等待对方连接…</span>
+        <div class="recv-row" data-page-node-id="9MX4WtY0DMx7jUEEQedeN9">
+          <span id="recv-status" class="recv-status" data-page-node-id="TfivxXSS2HyZZbxKclBVLZ">等待对方连接…</span>
         </div>
-        <div id="recv-progress" class="progress-wrap hidden">
-          <div id="recv-bar" class="progress-bar" style="width:0%"></div>
+        <div id="recv-progress" class="progress-wrap hidden" data-page-node-id="N6Ys1SfJr43NEekEUAx1Yx">
+          <div id="recv-bar" class="progress-bar" style="width:0%" data-page-node-id="scFto5U6hPyEzV2zATiVIm"></div>
         </div>
-        <div id="recv-meta" class="progress-meta hidden"></div>
+        <div id="recv-meta" class="progress-meta hidden" data-page-node-id="Gb0cF8p26zPwA24nRgwy1X"></div>
+      </div>
+    </section>
+
+    <!-- 设备页 -->
+    <section id="page-devices" class="page hidden" data-page-node-id="CE92KKEtf7oQIqEUxpw2vE">
+      <div class="card" data-page-node-id="ZOeAtJcHty2mcIV4lHcqWg">
+        <div class="card-row" data-page-node-id="kZP8rnBoQ1sOuAYT36LFYR">
+          <div class="card-title" data-page-node-id="guWRQ9DFcfOqil9wCPXVy6">局域网设备</div>
+          <button id="btn-refresh-devices" class="btn btn-ghost btn-sm" data-page-node-id="Pbqaq13RLN5pBhU1iLbdNa">刷新</button>
+        </div>
+        <div id="device-list" class="list" data-page-node-id="4SLiUSDQqW3m9uWyJrSGeP"></div>
+        <div id="device-empty" class="empty-hint" data-page-node-id="X0n1xviaNyB0GVSbBBcpQ3">正在搜索同网段的其他 TwimStar…</div>
+      </div>
+      <div class="card card-hint" data-page-node-id="AJBT1NkqeXPdhHXhPRkRTw">
+        设备发现依赖局域网 UDP 广播。若两台机器不在同一 Wi-Fi / 交换机下，或 Windows 防火墙拦截了 TwimStar，这里会为空——此时仍可手动粘贴对方连接码。
+        <br />列表里带「⚡」的设备表示已拿到它的直连地址，点击后走直连，不必再等网络发现。
+      </div>
+    </section>
+
+    <!-- 我的文件页 -->
+    <section id="page-files" class="page hidden" data-page-node-id="ch0hoQsI7DBpZXp5QD4OBO">
+      <div class="card" data-page-node-id="UpHpiIY3iVFFG3mE7GqJND">
+        <div class="card-row" data-page-node-id="Kzg6mGEdIIodfUAXSZcR5V">
+          <div class="card-title" data-page-node-id="LMNEF6DeQhD08KqBVHPZFA">已接收文件</div>
+          <div class="card-actions" data-page-node-id="snWuHMdF1f2lZQTfc6eOkx">
+            <button id="btn-open-folder" class="btn btn-ghost btn-sm" data-page-node-id="rcw4ndvlVHunlz8QQTuaoD">打开文件夹</button>
+            <button id="btn-refresh-files" class="btn btn-ghost btn-sm" data-page-node-id="eryWGD9cVnbiSa0fJlBGmE">刷新</button>
+          </div>
+        </div>
+        <div id="file-list" class="list" data-page-node-id="idPKMAjcDcOPBiEo3zDQlu"></div>
+        <div id="file-empty" class="empty-hint" data-page-node-id="FHl5PWKK8L4dWKM3o9i8ji">还没有接收过文件。</div>
       </div>
     </section>
 
     <!-- 日志页 -->
-    <section id="page-logs" class="page hidden">
-      <div class="card card-full">
-        <div class="card-row">
-          <div class="card-title">活动日志</div>
-          <div class="card-actions">
-            <span id="log-count" class="pill pill-blue">0 条</span>
-            <button id="btn-clear" class="btn btn-ghost btn-sm">清空</button>
+    <section id="page-logs" class="page hidden" data-page-node-id="zWg9o36Lg8i1FrK3tJJzk0">
+      <div class="card card-full" data-page-node-id="o3XHgvFQ8QKa4fYWg3mzkU">
+        <div class="card-row" data-page-node-id="RUyf8uWwTcAjn1xB0UKKgq">
+          <div class="card-title" data-page-node-id="GNkDer1v8GuQOIW8IhhYGA">活动日志</div>
+          <div class="card-actions" data-page-node-id="QPii94HXc94nQ3lMY5OMHz">
+            <span id="log-count" class="pill pill-blue" data-page-node-id="0lGD0dxW77008DTHXeWU9M">0 条</span>
+            <button id="btn-clear" class="btn btn-ghost btn-sm" data-page-node-id="T8UXVo2BG86tCFUJIIRuGh">清空</button>
           </div>
         </div>
-        <div id="log-list" class="log-list"></div>
+        <div id="log-list" class="log-list" data-page-node-id="wIWYwMOA2rC4eUxNIg30PT"></div>
       </div>
     </section>
 
     <!-- 网络页 -->
-    <section id="page-net" class="page hidden">
-      <div class="card">
-        <div class="card-row">
-          <div class="card-title">网络自检</div>
-          <button id="btn-diag" class="btn btn-ghost btn-sm">重新检测</button>
+    <section id="page-net" class="page hidden" data-page-node-id="AsQM0Zg9LGvKPs4g6Eowjx">
+      <div class="card" data-page-node-id="lKEfcXbUa1Cw3SJzMQRR0u">
+        <div class="card-row" data-page-node-id="FFw1Vt7rouTv1BrGWdcuAu">
+          <div class="card-title" data-page-node-id="rVgBkFF8jCEjmilsYElbeZ">网络自检</div>
+          <button id="btn-diag" class="btn btn-ghost btn-sm" data-page-node-id="SNS6nWdv9Wc6OA0EnEXAPJ">重新检测</button>
         </div>
-        <div id="diag-lead" class="diag-lead">正在检测网络环境…</div>
-        <div id="diag-advice" class="diag-advice"></div>
+        <div id="diag-lead" class="diag-lead" data-page-node-id="PLc8OhPalhC5f3j90oFxfr">正在检测网络环境…</div>
+        <div id="diag-advice" class="diag-advice" data-page-node-id="oWkBDpiwkgmqCwx0nSVLWu"></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">连通性</div>
-        <div id="diag-grid" class="kv-grid"></div>
+      <div class="card" data-page-node-id="mK8lDnDWa8c9LOI0cO835R">
+        <div class="card-title" data-page-node-id="9UJlYHpgTCe6b5oErb0Ueb">连通性</div>
+        <div id="diag-grid" class="kv-grid" data-page-node-id="yV1JxVwLNeVuKmrdOQyhzG"></div>
       </div>
 
-      <div class="card">
-        <div class="card-title">中继延迟</div>
-        <div id="diag-relays" class="kv-grid"></div>
+      <div class="card" data-page-node-id="E4ys4wULfPlWgB2ee52pXj">
+        <div class="card-title" data-page-node-id="HJg5eA5oDnZHnOnkaQMIL6">中继延迟</div>
+        <div id="diag-relays" class="kv-grid" data-page-node-id="NVlKPDbU6O1HIJIU7LUvOL"></div>
       </div>
     </section>
   </main>
 
   <!-- 状态栏 -->
-  <footer class="statusbar">
-    <div class="status-left">
-      <span id="status-dot" class="dot dot-gray"></span>
-      <span id="status-text">正在建立网络…</span>
+  <footer class="statusbar" data-page-node-id="RY2KWswZYxOjupuo4yAxh2">
+    <div class="status-left" data-page-node-id="7I45nUrXg14vnD6xGRKVLc">
+      <span id="status-dot" class="dot dot-gray" data-page-node-id="5OxtQIKHArGyF5KPnsTMOL"></span>
+      <span id="status-text" data-page-node-id="CwKN4loM5Ll3pVsH3hrXwk">正在建立网络…</span>
     </div>
-    <span class="version">v0.8</span>
+    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.9.0</span>
   </footer>
 
   <script src="app.js"></script>

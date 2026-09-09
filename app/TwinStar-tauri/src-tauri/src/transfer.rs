@@ -199,11 +199,6 @@ pub fn build_meta_named(path: &Path, display: Option<&str>) -> Result<FileMeta> 
     })
 }
 
-/// 组装发送侧元数据（名字取源路径的 `file_name()`）。
-pub fn build_meta(path: &Path) -> Result<FileMeta> {
-    build_meta_named(path, None)
-}
-
 // ---------------------------------------------------------------- 发送
 
 /// 发送文件；`on_progress(sent, total)` 用于回报进度。
@@ -910,7 +905,7 @@ mod tests {
         let part = part_path(&final_path);
         std::fs::write(&part, &data[..half]).unwrap();
 
-        let meta = build_meta(&src).unwrap();
+        let meta = build_meta_named(&src, None).unwrap();
         write_sidecar(&final_path, meta.size, &meta.fingerprint).unwrap();
 
         let (server, client) = endpoint_pair().await;

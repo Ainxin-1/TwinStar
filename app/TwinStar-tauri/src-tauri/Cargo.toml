@@ -17,16 +17,11 @@ tokio = { version = "1", features = ["full"] }
 anyhow = "1"
 rfd = "0.17"
 
-# ---- 密码学（自 TwinStar v4 移植：认证 / 协商 / 加密三种角色分离）----
+# ---- 密码学（设备身份与密钥派生；传输加密由 iroh TLS 1.3 承担）----
 ed25519-dalek = { version = "2", features = ["rand_core"] }
-x25519-dalek = { version = "2", features = ["static_secrets"] }
 rand = "0.8"
 sha2 = "0.10"
-hmac = "0.12"
 hkdf = "0.12"
-aes-gcm = "0.10"
-pbkdf2 = "0.12"
-subtle = "2"
 hex = "0.4"
 dirs = "5"
 base64 = "0.22"

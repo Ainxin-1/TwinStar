@@ -4,7 +4,7 @@ Windows 桌面 P2P 文件传输工具。局域网直连、跨网 NAT 打洞、�
 
 **下载**：[TwinStar v0.10.0（Windows x64，约 23 MB）](https://github.com/Ainxin-1/TwinStar/releases/download/v0.10.0/TwinStar-v0.10.0-win-x64.exe)
 
-> **协议兼容性**：v0.10.0 更换了传输协议标识（ALPN `twinstar/1`），与 v0.9.x 及更早版本**互不相通**。传输双方请使用相同主版本。
+> **协议兼容性**：v0.10.1 更换了局域网发现的广播魔数（`TWINSTAR-DISC-v1`），v0.10.0 更换了传输协议标识（ALPN `twinstar/1`）。与 v0.9.x 及更早版本**互不相通**；v0.10.1 与 v0.10.0 之间传输可用（连接码），但局域网广播互相发现不了。传输双方建议使用相同版本。
 
 ## 工作方式
 
@@ -74,9 +74,7 @@ app/TwinStar-tauri/src-tauri/src/
   net.rs         端点构建调参、连接码解析、通路判定、网络自检
   transfer.rs    传输协议：元数据协商 / 并行分块 / 续传 / 校验 / 会话复用
   disc.rs        局域网 UDP 广播发现
-  core/          纯逻辑层（config / identity / path 已接入；
-                 crypto / handshake / framing / message / peer 为自旧版
-                 TwinStar v4 移植的预留层，当前未接入传输链路）
+  core/          纯逻辑层（config / identity / limits / path，均已接入主链路）
 ```
 
 ## 构建
@@ -96,7 +94,7 @@ cargo build --release --features custom-protocol
 cargo test --release
 ```
 
-47 项单元 / 集成测试（含端到端传输、断点续传、并行分块、路径防御、连接码解析），另有 2 项真机网络自检 smoke 测试需真实网络环境，默认忽略：
+28 项单元 / 集成测试（含端到端传输、断点续传、并行分块、路径防御、连接码解析），另有 2 项真机网络自检 smoke 测试需真实网络环境，默认忽略：
 
 ```bash
 cargo test smoke_real_network_diag -- --ignored --nocapture

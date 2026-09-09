@@ -25,7 +25,7 @@ use tokio::net::UdpSocket;
 
 /// 发现专用端口，刻意避开 iroh 占用的范围。
 pub const DISCOVERY_PORT: u16 = 39617;
-const MAGIC: &str = "TWIMSTAR-DISC-v1";
+const MAGIC: &str = "TWINSTAR-DISC-v1";
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(3);
 const SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 /// 超过这个时间没再收到某设备的心跳，就当它离线。

@@ -5,9 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
-use super::limits::{
-    MAX_DIRECTORY_DEPTH, MAX_NAME_COMPONENT_LENGTH, MAX_RELATIVE_PATH_LENGTH,
-};
+/// 相对路径总长度上限（4 KiB）。
+pub const MAX_RELATIVE_PATH_LENGTH: usize = 4096;
+/// 单个路径组件（文件/目录名）长度上限。
+pub const MAX_NAME_COMPONENT_LENGTH: usize = 255;
+/// 目录嵌套深度上限。
+pub const MAX_DIRECTORY_DEPTH: usize = 32;
 
 /// Windows 保留设备名（不分大小写）。
 const RESERVED: [&str; 15] = [
@@ -156,14 +159,6 @@ pub fn unique_path(dir: &Path, filename: &str) -> PathBuf {
             return candidate;
         }
         i += 1;
-    }
-}
-
-pub fn basename(path: &str) -> String {
-    let normalized = path.replace('\\', "/");
-    match normalized.rfind('/') {
-        Some(i) => normalized[i + 1..].to_string(),
-        None => normalized,
     }
 }
 

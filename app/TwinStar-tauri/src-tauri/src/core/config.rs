@@ -7,16 +7,12 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     pub nickname: String,
-    pub download_dir: PathBuf,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             nickname: whoami_nickname(),
-            download_dir: dirs::download_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("TwinStar"),
         }
     }
 }
@@ -36,15 +32,6 @@ impl Config {
             }
         }
         Self::default()
-    }
-
-    pub fn save(&self) -> Result<(), String> {
-        let Some(path) = Self::file_path() else {
-            return Err("无法获取配置目录".into());
-        };
-        let _ = std::fs::create_dir_all(path.parent().unwrap_or(&path));
-        let raw = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&path, raw).map_err(|e| e.to_string())
     }
 }
 

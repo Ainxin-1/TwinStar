@@ -783,10 +783,10 @@ mod tests {
     use iroh::{Endpoint, RelayMode, TransportAddr, endpoint::presets};
     use std::net::SocketAddr;
 
-    const TEST_ALPN: &[u8] = b"twimstar/test";
+    const TEST_ALPN: &[u8] = b"twinstar/test";
 
     fn scratch(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("twimstar-test-{tag}-{}", now_nanos()));
+        let d = std::env::temp_dir().join(format!("twinstar-test-{tag}-{}", now_nanos()));
         std::fs::create_dir_all(&d).unwrap();
         d
     }

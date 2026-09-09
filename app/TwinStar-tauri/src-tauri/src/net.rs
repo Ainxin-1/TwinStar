@@ -367,7 +367,7 @@ pub fn connect_hint(err: &str, had_addrs: bool) -> &'static str {
         return if had_addrs {
             "地址可能已过期（对方换了网络或重启过软件），让对方重新复制一次「带地址」的连接码。"
         } else {
-            "对方可能没开 TwimStar。若确认已开，让对方点「复制带地址」把带直连地址的码发给你再试。"
+            "对方可能没开 TwinStar。若确认已开，让对方点「复制带地址」把带直连地址的码发给你再试。"
         };
     }
     if lower.contains("connection closed")
@@ -626,7 +626,7 @@ mod tests {
     /// 真机冒烟：连真实网络跑一次自检，把结果打出来给人看。
     ///
     /// 默认跳过（要联网、要几秒）。跑法：
-    /// `cargo test -p twimstar net::tests::smoke_real_network_diag -- --ignored --nocapture`
+    /// `cargo test -p twinstar net::tests::smoke_real_network_diag -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "需要真实网络，默认不跑"]
     async fn smoke_real_network_diag() {
@@ -645,7 +645,7 @@ mod tests {
         println!("建议        : {}", d.advice);
         assert!(
             d.relay.is_some() || d.udp_v4 || d.udp_v6,
-            "至少要能连上中继，或 UDP 可用，否则这个网络下 TwimStar 完全没法工作"
+            "至少要能连上中继，或 UDP 可用，否则这个网络下 TwinStar 完全没法工作"
         );
     }
 
@@ -707,7 +707,7 @@ mod tests {
         use iroh::address_lookup::AddrFilter;
 
         const SIZE: usize = 32 * 1024 * 1024;
-        let dir = std::env::temp_dir().join(format!("twimstar-bench-{}", now_nanos()));
+        let dir = std::env::temp_dir().join(format!("twinstar-bench-{}", now_nanos()));
         std::fs::create_dir_all(&dir).unwrap();
         let src = dir.join("payload.bin");
         std::fs::write(&src, vec![0x5Au8; SIZE]).unwrap();

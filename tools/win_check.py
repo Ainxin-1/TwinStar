@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""启动 TwimStar 并确认窗口真的出来了。
+"""启动 TwinStar 并确认窗口真的出来了。
 
-Tauri 窗口是 WebView2，标题前缀为 "TwimStar"。
+Tauri 窗口是 WebView2，标题前缀为 "TwinStar"。
 用 ctypes 调 user32.EnumWindows，避免额外装 pywin32。
 """
 import ctypes
@@ -9,8 +9,8 @@ import subprocess
 import sys
 import time
 
-EXE = sys.argv[1] if len(sys.argv) > 1 else r"D:\TwinStar\release\TwimStar.exe"
-TITLE_HINT = "TwimStar"
+EXE = sys.argv[1] if len(sys.argv) > 1 else r"D:\TwinStar\release\TwinStar.exe"
+TITLE_HINT = "TwinStar"
 
 user32 = ctypes.windll.user32
 EnumWindows = user32.EnumWindows

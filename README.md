@@ -1,8 +1,8 @@
-# TwimStar ☄
+# TwinStar ☄
 
 零成本 P2P 文件传输软件 —— 局域网直连 / 跨网打洞 / 中继兜底，全程零服务器、零账号、免 VPN。
 
-**下载**：[TwimStar v0.9.2（Windows x64）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.9.2/TwimStar-v0.9.2-win-x64.exe)
+**下载**：[TwinStar v0.9.2（Windows x64）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.9.2/TwinStar-v0.9.2-win-x64.exe)
 SHA-256：`640df2d47b847f5d5ced8bfaaff2c0146539206120c71619208deda9c14f21bf`
 
 ## 特性
@@ -59,11 +59,11 @@ SHA-256：`640df2d47b847f5d5ced8bfaaff2c0146539206120c71619208deda9c14f21bf`
 ## 构建
 
 ```bash
-cd app/TwimStar-tauri/src-tauri
+cd app/TwinStar-tauri/src-tauri
 cargo build --release --features custom-protocol
 ```
 
-产物：`target/release/twimstar.exe`（单文件绿色版，需系统装有 WebView2 运行时，Win10/11 默认自带）。
+产物：`target/release/twinstar.exe`（单文件绿色版，需系统装有 WebView2 运行时，Win10/11 默认自带）。
 
 > 低内存机器建议加 `-j 1` 并设 `CARGO_PROFILE_RELEASE_OPT_LEVEL=1`。
 
@@ -78,12 +78,12 @@ cargo build --release --features custom-protocol
 ## 目录结构
 
 ```
-app/TwimStar-tauri   # 当前主版本：Tauri 2 + iroh
+app/TwinStar-tauri   # 当前主版本：Tauri 2 + iroh
   src-tauri/src/net.rs      网络层：打洞参数 / 连接码 / 通路判定 / 网络自检
   src-tauri/src/transfer.rs 传输层：续传 + SHA-256 落盘校验 + 连接会话复用
   src-tauri/src/disc.rs     局域网 UDP 广播发现（携带直连地址）
   src-tauri/src/core/       纯逻辑层（自 TwinStar v4 移植）
-app/TwimStar         # 历史版本：egui 界面
+app/TwinStar         # 历史版本：egui 界面
 demo/iroh-transfer   # 里程碑 1：iroh 最小 CLI demo
 tools/               # 网络探测脚本等
 ```

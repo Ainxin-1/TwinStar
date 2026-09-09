@@ -1,4 +1,4 @@
-// TwimStar v0.8 — 前端逻辑（Tauri API）
+// TwinStar v0.8 — 前端逻辑（Tauri API）
 const { invoke } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
 const { getCurrentWebview } = window.__TAURI__.webview;
@@ -563,7 +563,7 @@ function renderDevices(list) {
 }
 
 $("btn-refresh-devices").addEventListener("click", () => {
-  deviceEmpty.textContent = "正在搜索同网段的其他 TwimStar…";
+  deviceEmpty.textContent = "正在搜索同网段的其他 TwinStar…";
   deviceEmpty.classList.remove("hidden");
   deviceList.innerHTML = "";
 });

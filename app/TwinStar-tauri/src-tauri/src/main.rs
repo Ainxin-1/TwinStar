@@ -1,4 +1,4 @@
-//! TwimStar v0.8 — Tauri 2 版（WebView2 UI + iroh QUIC 网络层）
+//! TwinStar v0.8 — Tauri 2 版（WebView2 UI + iroh QUIC 网络层）
 //!
 //! 分层：
 //!   - [`core`]     纯逻辑层（自 TwinStar v4.0.1 移植）：路径安全 / 密码学 / 设备身份 / 帧格式
@@ -867,7 +867,7 @@ fn main() {
                             let _ = handle.emit("net-ready", &id);
 
                             // 局域网设备发现：广播本机连接码 + 昵称 + 直连地址，
-                            // 收同网段的其他 TwimStar（点一下即直连，不走发现服务）。
+                            // 收同网段的其他 TwinStar（点一下即直连，不走发现服务）。
                             let ep_for_disc = endpoint.clone();
                             disc::start(
                                 handle.clone(),

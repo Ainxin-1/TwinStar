@@ -2,7 +2,7 @@
 
 零成本 P2P 文件传输软件 —— 局域网直连 / 跨网打洞 / 中继兜底，全程零服务器、零账号、免 VPN。
 
-**下载**：[TwinStar v0.10.0（Windows x64）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.10.0/TwinStar-v0.10.0-win-x64.exe)
+**下载**：[TwinStar v0.10.0（Windows x64）](https://github.com/Ainxin-1/TwinStar/releases/download/v0.10.0/TwinStar-v0.10.0-win-x64.exe)
 SHA-256：*见 Release 页*
 
 > ⚠️ v0.10.0 起协议标识更名（ALPN `twinstar/1`），与 v0.9.x **互不相通**——请双方都升级。

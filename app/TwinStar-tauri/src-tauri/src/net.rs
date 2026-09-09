@@ -21,7 +21,7 @@ use std::time::{Duration, Instant};
 /// 拉起控制台程序（tasklist / ipconfig）时不弹黑框。
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-pub const ALPN: &[u8] = b"twimstar/1";
+pub const ALPN: &[u8] = b"twinstar/1";
 
 /// 打洞等待上限：给 QUIC 一点时间从"中继先行"升级到"直连"，
 /// 大文件走直连能差一个数量级，等 2.5s 很划算；等不到就先走中继，不阻塞传输。

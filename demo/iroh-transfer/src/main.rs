@@ -11,7 +11,7 @@ use std::time::Instant;
 use anyhow::{Result, bail};
 use iroh::{Endpoint, EndpointId, RelayMode, SecretKey, endpoint::presets};
 
-const ALPN: &[u8] = b"twimstar/demo/1";
+const ALPN: &[u8] = b"twinstar/demo/1";
 
 #[tokio::main]
 async fn main() -> Result<()> {

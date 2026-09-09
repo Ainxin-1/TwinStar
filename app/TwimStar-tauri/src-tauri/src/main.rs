@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use iroh::{Endpoint, EndpointId, endpoint::Connection};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::core::config::Config;
@@ -154,6 +154,19 @@ struct ProgressView {
     speed: u64,
     /// 预计剩余秒数
     eta: u32,
+    /// 当前第几个文件（从 0 起）
+    index: usize,
+    /// 本次一共几个文件
+    count: usize,
+}
+
+/// 待发送的一项：`path` 是本机的绝对路径，`name` 是对端看到的名字
+/// （传文件夹时是相对路径，如 `照片/北京/1.jpg`，让对方保留目录结构）。
+#[derive(Serialize, Deserialize, Clone)]
+struct SendItem {
+    path: String,
+    name: String,
+    size: u64,
 }
 
 /// 滑动窗口速率表：取最近 800ms 的斜率，比"总量/总时长"更能反映当下网速。
@@ -230,12 +243,15 @@ fn eta_secs(sent: u64, total: u64, speed: f64) -> u32 {
 // ---------------- 发送 / 接收 ----------------
 
 /// 在一条连接上发一个文件，并把进度实时推给前端。
+#[allow(clippy::too_many_arguments)]
 async fn send_with_progress(
     app: &AppHandle,
     conn: &Connection,
     path: &Path,
     opts: &SendOptions,
     name: &str,
+    index: usize,
+    count: usize,
 ) -> Result<String> {
     transfer::send_on_conn(conn, path, opts, {
         let app = app.clone();
@@ -254,6 +270,8 @@ async fn send_with_progress(
                         total,
                         speed: speed as u64,
                         eta: eta_secs(sent, total, speed),
+                        index,
+                        count,
                     },
                 );
             }
@@ -262,26 +280,67 @@ async fn send_with_progress(
     .await
 }
 
-/// 发送包装：取连接（能复用就复用）→ 判定通路 → [`transfer::send_on_conn`]，把进度转成 UI 事件。
+/// 一批文件走同一条连接依次发送，返回成功发出的个数。
+///
+/// 关键在"同一条连接"：打洞只做一次，后面每个文件直接复用已建好的通路。
+/// 每个文件的等待打洞时长都是 0 —— 拨号时已经等过了，没必要每个文件再等一遍。
+async fn send_batch(
+    app: &AppHandle,
+    conn: &Connection,
+    items: &[SendItem],
+    flag: &Arc<AtomicBool>,
+) -> Result<usize> {
+    let count = items.len();
+    for (index, item) in items.iter().enumerate() {
+        if flag.load(Ordering::Relaxed) {
+            anyhow::bail!("已取消发送");
+        }
+        let opts = SendOptions {
+            wait_direct: Duration::ZERO,
+            cancel: Some(flag.clone()),
+            name: Some(item.name.clone()),
+        };
+        if let Err(e) = send_with_progress(
+            app,
+            conn,
+            Path::new(&item.path),
+            &opts,
+            &item.name,
+            index,
+            count,
+        )
+        .await
+        {
+            return Err(anyhow::anyhow!(
+                "第 {}/{} 个文件（{}）发送失败：{e:#}",
+                index + 1,
+                count,
+                item.name
+            ));
+        }
+        if count > 1 {
+            let _ = app.emit(
+                "log",
+                format!("📤 已发送 {}/{}：{}", index + 1, count, item.name),
+            );
+        }
+    }
+    Ok(count)
+}
+
+/// 发送包装：取连接（能复用就复用）→ 判定通路 → 整批文件依次发送。
 async fn do_send(
     app: AppHandle,
     endpoint: Endpoint,
     id: EndpointId,
     addrs: Vec<SocketAddr>,
-    path: PathBuf,
+    items: Vec<SendItem>,
 ) {
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "file".into());
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let total_bytes: u64 = items.iter().map(|i| i.size).sum();
+    let wait_direct = wait_direct_for(total_bytes);
 
     let flag = cancel_flag();
     flag.store(false, Ordering::Relaxed);
-    let opts = SendOptions {
-        wait_direct: wait_direct_for(size),
-        cancel: Some(flag.clone()),
-    };
     let reused = take_conn(&id);
     let t0 = Instant::now();
 
@@ -299,12 +358,14 @@ async fn do_send(
                     format!("📮 连接码自带 {} 个地址，跳过地址发现", addrs.len()),
                 );
             }
-            match net::connect_peer(&endpoint, addr, ALPN, opts.wait_direct).await {
+            match net::connect_peer(&endpoint, addr, ALPN, wait_direct).await {
                 Ok(c) => (c, false),
                 Err(e) => {
                     let _ = app.emit("send-done", "");
                     let _ = app.emit("log", format!("❌ 发送失败：{e:#}"));
-                    if let Some(hint) = non_empty(net::connect_hint(&format!("{e:#}"), !addrs.is_empty())) {
+                    if let Some(hint) =
+                        non_empty(net::connect_hint(&format!("{e:#}"), !addrs.is_empty()))
+                    {
                         let _ = app.emit("log", format!("💡 {hint}"));
                     }
                     return;
@@ -319,17 +380,19 @@ async fn do_send(
         "log",
         format!("🔗 通路：{} {}（RTT {} ms）", view.label, view.detail, view.rtt_ms),
     );
-    if view.kind != net::PathKind::Direct && opts.wait_direct.is_zero() {
+    if view.kind != net::PathKind::Direct && wait_direct.is_zero() {
         let _ = app.emit("log", "ℹ️ 正在后台尝试打洞，成功会自动切到直连");
     }
 
     let mut stop_watch = watch_path(&app, &conn);
     let mut conn = conn;
-    let mut outcome = send_with_progress(&app, &conn, &path, &opts, &name).await;
+    let mut outcome = send_batch(&app, &conn, &items, &flag).await;
 
     // 复用来的连接可能是"僵尸"：对端早就把程序关了，本地看着还在。
     // 这种失败不能算在用户头上，丢掉重连一次即可。
-    if outcome.is_err() && is_reused {
+    // 例外：用户主动取消不该触发重连（不然取消会变成"取消 + 重发一遍"）。
+    let cancelled = flag.load(Ordering::Relaxed);
+    if outcome.is_err() && is_reused && !cancelled {
         let _ = app.emit("log", "🔄 旧连接已失效，重新建立…");
         match net::connect_peer(
             &endpoint,
@@ -344,7 +407,8 @@ async fn do_send(
                 conn = fresh;
                 let _ = app.emit("conn-info", &net::describe(&conn));
                 stop_watch = watch_path(&app, &conn);
-                outcome = send_with_progress(&app, &conn, &path, &opts, &name).await;
+                flag.store(false, Ordering::Relaxed);
+                outcome = send_batch(&app, &conn, &items, &flag).await;
             }
             Err(e) => {
                 let _ = app.emit("log", format!("❌ 重连失败：{e:#}"));
@@ -359,18 +423,25 @@ async fn do_send(
     let _ = app.emit("conn-info", &final_view);
     put_conn(&id, conn);
 
+    let detail = format!("{} {}", final_view.label, final_view.detail);
     match outcome {
-        Ok(msg) => {
-            let elapsed = t0.elapsed().as_secs_f64().max(1e-9);
-            let speed = format_size((size as f64 / elapsed) as u64);
-            let text = format!(
-                "✅ 发送完成：{name}（{}）/ 耗时 {:.1?} / {speed}/s / {}\n通路：{} {}",
-                format_size(size),
-                t0.elapsed(),
-                msg,
-                final_view.label,
-                final_view.detail
-            );
+        Ok(n) => {
+            let elapsed = t0.elapsed();
+            let speed = format_size((total_bytes as f64 / elapsed.as_secs_f64().max(1e-9)) as u64);
+            let text = if items.len() == 1 {
+                format!(
+                    "✅ 发送完成：{}（{}）/ 耗时 {:.1?} / {speed}/s\n通路：{detail}",
+                    items[0].name,
+                    format_size(total_bytes),
+                    elapsed
+                )
+            } else {
+                format!(
+                    "✅ 全部发送完成：{n} 个文件 / 合计 {} / 耗时 {:.1?} / {speed}/s\n通路：{detail}",
+                    format_size(total_bytes),
+                    elapsed
+                )
+            };
             let _ = app.emit("send-done", &text);
             let _ = app.emit("log", &text);
         }
@@ -426,6 +497,8 @@ async fn do_recv(app: AppHandle, conn: iroh::endpoint::Connection, dir: PathBuf)
                             sent: got,
                             total,
                             speed: speed as u64,
+                            index: 0,
+                            count: 1,
                             eta: eta_secs(got, total, speed),
                         },
                     );
@@ -460,11 +533,117 @@ async fn do_recv(app: AppHandle, conn: iroh::endpoint::Connection, dir: PathBuf)
 
 // ---------------- Tauri 命令 ----------------
 
+/// 一次最多发多少个文件。再多了要么是误选（比如选了整个磁盘），
+/// 要么就是该做成压缩包，逐个走一遍 QUIC 流并不划算。
+const MAX_SEND_FILES: usize = 5000;
+
 #[tauri::command]
+#[allow(dead_code)]
 fn pick_file() -> Option<String> {
     rfd::FileDialog::new()
         .pick_file()
         .map(|p| p.display().to_string())
+}
+
+#[tauri::command]
+fn pick_files() -> Option<Vec<String>> {
+    rfd::FileDialog::new()
+        .pick_files()
+        .map(|ps| ps.into_iter().map(|p| p.display().to_string()).collect())
+}
+
+/// 选一个**要发送**的文件夹。注意别和 `pick_folder`（设置接收目录）混用。
+#[tauri::command]
+fn pick_send_folder() -> Option<String> {
+    rfd::FileDialog::new()
+        .pick_folder()
+        .map(|p| p.display().to_string())
+}
+
+/// 把用户选中的文件 / 文件夹摊平成待发清单。
+///
+/// 目录会递归展开成文件，显示名保留相对路径（`顶层目录名/子目录/文件`），
+/// 这样对方收到的目录结构和发的一模一样，而不是一堆平铺的同名文件。
+#[tauri::command]
+fn prepare_send(paths: Vec<String>) -> Result<Vec<SendItem>, String> {
+    let mut out: Vec<SendItem> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for raw in paths {
+        let p = PathBuf::from(raw.trim());
+        if p.is_file() {
+            push_item(&mut out, &mut seen, &p, None);
+        } else if p.is_dir() {
+            // 相对路径的基准取父目录，好把顶层目录名一起带上（"D:/照片/x.jpg" → "照片/x.jpg"）
+            let base = p.parent().unwrap_or(Path::new("")).to_path_buf();
+            collect_dir(&p, &base, &mut out, &mut seen);
+        }
+    }
+
+    if out.is_empty() {
+        return Err("没有可发送的文件（可能全是空目录或系统文件）".into());
+    }
+    if out.len() > MAX_SEND_FILES {
+        return Err(format!(
+            "一次最多发送 {} 个文件，当前展开后有 {} 个",
+            MAX_SEND_FILES,
+            out.len()
+        ));
+    }
+    Ok(out)
+}
+
+fn push_item(
+    out: &mut Vec<SendItem>,
+    seen: &mut std::collections::HashSet<String>,
+    path: &Path,
+    name: Option<String>,
+) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if !meta.is_file() || is_hidden_or_system(&meta) {
+        return;
+    }
+    let key = path.to_string_lossy().to_lowercase();
+    if !seen.insert(key) {
+        return; // 同一个文件被选了两次（比如选了文件夹又选了里面的文件）
+    }
+    let name = name.unwrap_or_else(|| {
+        path.file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into())
+    });
+    out.push(SendItem {
+        path: path.display().to_string(),
+        name,
+        size: meta.len(),
+    });
+}
+
+fn collect_dir(
+    dir: &Path,
+    base: &Path,
+    out: &mut Vec<SendItem>,
+    seen: &mut std::collections::HashSet<String>,
+) {
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in rd.flatten() {
+        let path = entry.path();
+        let Ok(meta) = entry.metadata() else { continue };
+        if meta.is_dir() {
+            collect_dir(&path, base, out, seen);
+            continue;
+        }
+        // 相对路径统一用 `/`：对端校验的是 POSIX 风格分段，落盘时再转成系统分隔符。
+        let name = path
+            .strip_prefix(base)
+            .map(|r| r.to_string_lossy().replace('\\', "/"))
+            .ok();
+        push_item(out, seen, &path, name);
+    }
 }
 
 #[tauri::command]
@@ -483,19 +662,24 @@ fn get_save_dir() -> String {
 }
 
 #[tauri::command]
-fn start_send(app: AppHandle, peer_id: String, path: String) -> Result<(), String> {
+fn start_send(app: AppHandle, peer_id: String, files: Vec<SendItem>) -> Result<(), String> {
     let Some(endpoint) = ENDPOINT.get() else {
         return Err("网络尚未就绪，请稍候".to_string());
     };
     // 连接码可以是纯 id，也可以是 `id@ip:port,...`（带地址时跳过地址发现，直连更快）。
     let (id, addrs) = net::parse_peer_code(&peer_id).map_err(|e| e.to_string())?;
-    let p = PathBuf::from(path.trim());
-    if path.trim().is_empty() || !p.is_file() {
-        return Err("请先选择一个有效文件".to_string());
+    if files.is_empty() {
+        return Err("请先选择要发送的文件".to_string());
+    }
+    // 出发前再验一次：从选中到点发送之间文件可能已经被删了。
+    for f in &files {
+        if !Path::new(&f.path).is_file() {
+            return Err(format!("文件已不存在：{}", f.name));
+        }
     }
     let endpoint = endpoint.clone();
     tauri::async_runtime::spawn(async move {
-        do_send(app, endpoint, id, addrs, p).await;
+        do_send(app, endpoint, id, addrs, files).await;
     });
     Ok(())
 }
@@ -715,7 +899,9 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            pick_file,
+            pick_files,
+            pick_send_folder,
+            prepare_send,
             pick_folder,
             start_send,
             cancel_send,

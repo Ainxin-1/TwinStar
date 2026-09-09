@@ -35,6 +35,9 @@ pub struct SendOptions {
     pub wait_direct: Duration,
     /// 取消标志：置位后当前发送会尽快停下来。
     pub cancel: Option<Arc<AtomicBool>>,
+    /// 对端看到的文件名。默认取源路径的 `file_name()`；
+    /// 传整个文件夹时用相对路径（如 `照片/北京/1.jpg`），让对方保留目录结构。
+    pub name: Option<String>,
 }
 
 impl SendOptions {
@@ -151,12 +154,17 @@ fn mtime_ms(path: &Path) -> i64 {
 }
 
 /// 组装发送侧元数据（顺带算好指纹与整文件摘要）。
-pub fn build_meta(path: &Path) -> Result<FileMeta> {
+///
+/// `display` 为 `Some` 时用它当对端看到的名字，否则取源路径的 `file_name()`。
+pub fn build_meta_named(path: &Path, display: Option<&str>) -> Result<FileMeta> {
     let size = std::fs::metadata(path)?.len();
-    let name = path
-        .file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| "file".into());
+    let name = match display {
+        Some(n) if !n.trim().is_empty() => n.to_string(),
+        _ => path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "file".into()),
+    };
     let mtime = mtime_ms(path);
     let fingerprint = if size <= FULL_HASH_LIMIT {
         sha256_file(path)?
@@ -169,6 +177,11 @@ pub fn build_meta(path: &Path) -> Result<FileMeta> {
         sha256_file(path)?
     };
     Ok(FileMeta { name, size, fingerprint, sha256: digest })
+}
+
+/// 组装发送侧元数据（名字取源路径的 `file_name()`）。
+pub fn build_meta(path: &Path) -> Result<FileMeta> {
+    build_meta_named(path, None)
 }
 
 // ---------------------------------------------------------------- 发送
@@ -207,7 +220,7 @@ pub async fn send_on_conn<F>(
 where
     F: FnMut(u64, u64),
 {
-    let meta = build_meta(path)?;
+    let meta = build_meta_named(path, opts.name.as_deref())?;
     let (mut send, mut recv) = conn.open_bi().await.context("打开数据通道失败")?;
 
     let meta_json = serde_json::to_vec(&meta)?;
@@ -382,6 +395,11 @@ async fn handle_stream(
     }
     if !is_inside(save_dir, &final_path) {
         anyhow::bail!("目标路径越出下载目录");
+    }
+    // 名字里可能带子目录（传整个文件夹时）：先把父目录建出来，
+    // 否则后面的 rename 会撞"系统找不到指定的路径"。
+    if let Some(parent) = final_path.parent() {
+        std::fs::create_dir_all(parent).context("创建接收子目录失败")?;
     }
     let part = part_path(&final_path);
     if !is_inside(save_dir, &part) {

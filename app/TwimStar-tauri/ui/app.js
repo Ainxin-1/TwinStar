@@ -12,6 +12,8 @@ const btnCopy = $("btn-copy");
 const btnCopyAddr = $("btn-copy-addr");
 const dropzone = $("dropzone");
 const dropzoneText = $("dropzone-text");
+const pendingList = $("pending-list");
+const btnClearFiles = $("btn-clear-files");
 const peerInput = $("peer-id");
 const btnSend = $("btn-send");
 const btnCancel = $("btn-cancel");
@@ -37,7 +39,7 @@ const diagAdvice = $("diag-advice");
 const diagGrid = $("diag-grid");
 const diagRelays = $("diag-relays");
 
-let selectedFile = null;
+let selectedFiles = []; // 待发送清单：[{path, name, size}]
 let sending = false;
 let logLines = [];
 let netReady = false;
@@ -72,12 +74,13 @@ function fmtEta(sec) {
 }
 
 function progressText(p) {
-  return fmtSize(p.sent) + " / " + fmtSize(p.total) + " · " + fmtRate(p.speed) + fmtEta(p.eta);
+  const head = p.count > 1 ? `(${p.index + 1}/${p.count}) ` : "";
+  return head + fmtSize(p.sent) + " / " + fmtSize(p.total) + " · " + fmtRate(p.speed) + fmtEta(p.eta);
 }
 
 function setSendEnabled() {
   btnSend.disabled =
-    sending || !selectedFile || peerInput.value.trim().length === 0 || !netReady;
+    sending || selectedFiles.length === 0 || peerInput.value.trim().length === 0 || !netReady;
   btnCopy.disabled = !myId;
   btnCopyAddr.disabled = !myId;
 }
@@ -150,7 +153,8 @@ listen("send-progress", (e) => {
   sendMeta.classList.remove("hidden");
   sendBar.style.width = p.pct + "%";
   sendMeta.textContent = p.pct + "% · " + progressText(p);
-  statusText.textContent = "正在发送 " + p.pct + "%…";
+  const head = p.count > 1 ? `第 ${p.index + 1}/${p.count} 个 · ` : "";
+  statusText.textContent = "正在发送 " + head + p.pct + "%…";
   statusText.className = "busy";
   statusDot.className = "dot dot-blue";
 });
@@ -284,17 +288,79 @@ btnCopyAddr.addEventListener("click", async () => {
   setTimeout(() => (btnCopyAddr.textContent = "复制带地址"), 1200);
 });
 
-// ── 文件选择 ──
+// ── 文件选择（支持多选 / 文件夹）──
+async function choose(paths) {
+  if (!paths || !paths.length) return;
+  try {
+    const items = await invoke("prepare_send", { paths });
+    if (!items || !items.length) {
+      addLog("没有可发送的文件");
+      return;
+    }
+    // 合并去重（prepare_send 内部已去重，这里防止和已有清单重复）
+    selectedFiles = selectedFiles.concat(items);
+    renderPending();
+  } catch (e) {
+    addLog("选择失败：" + e);
+  }
+}
+
 dropzone.addEventListener("click", async () => {
-  const path = await invoke("pick_file");
-  if (path) selectFile(path);
+  const paths = await invoke("pick_files");
+  await choose(paths);
 });
 
-function selectFile(path) {
-  selectedFile = path;
-  dropzoneText.textContent = "📄  " + fullName(path);
+$("btn-pick-files").addEventListener("click", async () => {
+  const paths = await invoke("pick_files");
+  await choose(paths);
+});
+
+$("btn-pick-folder").addEventListener("click", async () => {
+  const folder = await invoke("pick_send_folder");
+  if (folder) await choose([folder]);
+});
+
+$("btn-clear-files").addEventListener("click", () => {
+  selectedFiles = [];
+  renderPending();
+});
+
+function renderPending() {
+  pendingList.innerHTML = "";
+  if (!selectedFiles.length) {
+    pendingList.classList.add("hidden");
+    btnClearFiles.classList.add("hidden");
+    dropzoneText.textContent = "📂 把文件拖到这里，或点击下方按钮选择";
+    dropzone.classList.remove("hasfile");
+    setSendEnabled();
+    return;
+  }
+  pendingList.classList.remove("hidden");
+  btnClearFiles.classList.remove("hidden");
   dropzone.classList.add("hasfile");
-  dropzone.title = path;
+
+  let total = 0;
+  selectedFiles.forEach((f) => (total += f.size || 0));
+  dropzoneText.textContent = `已选 ${selectedFiles.length} 个文件 · 合计 ${fmtSize(total)}`;
+  dropzone.title = selectedFiles.map((f) => f.name).join("\n");
+
+  for (const f of selectedFiles) {
+    const row = document.createElement("div");
+    row.className = "list-row";
+    const main = document.createElement("div");
+    main.className = "row-main";
+    const name = document.createElement("div");
+    name.className = "row-name";
+    name.textContent = f.name;
+    name.title = f.name;
+    const sub = document.createElement("div");
+    sub.className = "row-sub";
+    sub.textContent = fmtSize(f.size || 0);
+    main.appendChild(name);
+    main.appendChild(sub);
+    row.appendChild(main);
+    pendingList.appendChild(row);
+  }
   setSendEnabled();
 }
 
@@ -306,7 +372,7 @@ getCurrentWebview()
       dropzone.classList.add("drag");
     } else if (p.type === "drop") {
       dropzone.classList.remove("drag");
-      if (p.paths && p.paths.length) selectFile(p.paths[0]);
+      if (p.paths && p.paths.length) choose(p.paths);
     } else {
       dropzone.classList.remove("drag");
     }
@@ -331,8 +397,9 @@ btnSend.addEventListener("click", async () => {
   statusText.textContent = "正在连接 / 打洞…";
   statusText.className = "busy";
   statusDot.className = "dot dot-blue";
+  const files = selectedFiles;
   try {
-    await invoke("start_send", { peerId: peerInput.value, path: selectedFile });
+    await invoke("start_send", { peerId: peerInput.value, files });
   } catch (err) {
     showResult(String(err), false);
     sending = false;
@@ -340,6 +407,9 @@ btnSend.addEventListener("click", async () => {
     idle();
   }
   btnSend.textContent = "发 送";
+  // 发完清空待发送清单（成功的、失败的都清，避免重复发）
+  selectedFiles = [];
+  renderPending();
   setSendEnabled();
 });
 
@@ -450,7 +520,7 @@ function fillPeerAndSend(id) {
   peerInput.value = id;
   setSendEnabled();
   showTab("transfer");
-  if (selectedFile) btnSend.focus();
+  if (selectedFiles.length) btnSend.focus();
 }
 
 function renderDevices(list) {

@@ -50,8 +50,14 @@
       <div class="card" data-page-node-id="LdRm7l2vuooDXQsYjCKBX5">
         <div class="card-title" data-page-node-id="OoqKItKDXmerO9xNNfADAM">发送文件</div>
         <div id="dropzone" class="dropzone" data-page-node-id="L8btDmGGcpB8npgdSbAyFr">
-          <span id="dropzone-text" data-page-node-id="qHkEBpnPyiEisObZ2Inquh">📂 把文件拖到这里，或点击选择</span>
+          <span id="dropzone-text" data-page-node-id="qHkEBpnPyiEisObZ2Inquh">📂 把文件拖到这里，或点击下方按钮选择</span>
         </div>
+        <div class="btn-row" data-page-node-id="send-pick-row">
+          <button id="btn-pick-files" class="btn btn-ghost btn-sm" type="button">选择文件</button>
+          <button id="btn-pick-folder" class="btn btn-ghost btn-sm" type="button">选择文件夹</button>
+          <button id="btn-clear-files" class="btn btn-ghost btn-sm hidden" type="button">清空</button>
+        </div>
+        <div id="pending-list" class="list hidden" data-page-node-id="pending-list"></div>
         <label class="field-label" data-page-node-id="8xjIi1d3UFjeNCm0EyA0ZA">对方连接码</label>
         <input id="peer-id" class="text-input" type="text" placeholder="粘贴对方连接码（64 位 id，或 id@ip:port）" spellcheck="false" data-page-node-id="dxkm5HFCvoBCzrcaFumAEc" />
         <div class="btn-row" data-page-node-id="M7CtDTSj1JRDMWKz0QfKXm">
@@ -158,7 +164,7 @@
       <span id="status-dot" class="dot dot-gray" data-page-node-id="5OxtQIKHArGyF5KPnsTMOL"></span>
       <span id="status-text" data-page-node-id="CwKN4loM5Ll3pVsH3hrXwk">正在建立网络…</span>
     </div>
-    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.9.0</span>
+    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.9.1</span>
   </footer>
 
   <script src="app.js"></script>

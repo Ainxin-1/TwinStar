@@ -150,6 +150,21 @@ body { display: flex; flex-direction: column; }
   line-height: 1.6;
   color: var(--muted);
 }
+
+/* ── 待发送清单 ── */
+#pending-list {
+  margin-top: 10px;
+  max-height: 180px;
+  overflow-y: auto;
+  border: 1px solid var(--stroke);
+  border-radius: 8px;
+}
+#pending-list .list-row {
+  padding: 7px 10px;
+}
+#pending-list .row-name {
+  max-width: 100%;
+}
 .text-input {
   font-family: Consolas, monospace;
   font-size: 13px;

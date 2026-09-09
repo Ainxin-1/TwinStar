@@ -253,6 +253,19 @@ async fn send_with_progress(
     index: usize,
     count: usize,
 ) -> Result<String> {
+    // 大文件会走并行分块（对端不支持时自动降级），提前说一声，免得用户以为只有一条流在跑。
+    if let Ok(md) = std::fs::metadata(path) {
+        if md.len() >= transfer::PARALLEL_THRESHOLD {
+            let _ = app.emit(
+                "log",
+                format!(
+                    "⚡ 大文件并行分块：{} 路并发（{:.1} MB）",
+                    transfer::PARALLEL_CHUNKS,
+                    md.len() as f64 / 1024.0 / 1024.0
+                ),
+            );
+        }
+    }
     transfer::send_on_conn(conn, path, opts, {
         let app = app.clone();
         let name = name.to_string();

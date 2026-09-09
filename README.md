@@ -2,8 +2,8 @@
 
 零成本 P2P 文件传输软件 —— 局域网直连 / 跨网打洞 / 中继兜底，全程零服务器、零账号、免 VPN。
 
-**下载**：[TwimStar v0.9.1（Windows x64）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.9.1/TwimStar-v0.9.1-win-x64.exe)
-SHA-256：`a06869e034b469c012bac36063a76a0cc3608a6cff5ed716e98ecf71c3aef555`
+**下载**：[TwimStar v0.9.2（Windows x64）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.9.2/TwimStar-v0.9.2-win-x64.exe)
+SHA-256：`640df2d47b847f5d5ced8bfaaff2c0146539206120c71619208deda9c14f21bf`
 
 ## 特性
 
@@ -14,6 +14,8 @@ SHA-256：`a06869e034b469c012bac36063a76a0cc3608a6cff5ed716e98ecf71c3aef555`
 - **跨网打洞**：QUIC + NAT 打洞（iroh），CGNAT 环境实测可用
 - **连接可视**：顶栏实时显示当前走的是「⚡ 直连」还是「🔁 中继」以及 RTT
 - **速率可视**：传输中显示实时速率、已传/总量、预计剩余时间，支持中途取消
+- **并行分块**：≥16MB 大文件自动切成 4 路并发流发送，高 RTT / 中继链路也能吃满带宽；对端是旧版本会自动降级单流
+- **批量传输**：多选文件 / 整个文件夹 / 拖拽一批，一次打洞全部发完，接收侧保留目录结构
 - **网络自检**：一屏看清 UDP 通不通、NAT 类型、公网地址、中继延迟，并给出可执行建议
 - **代理告警**：检测到 sing-box / Clash 等 TUN 虚拟网卡会直接提示——它会吞掉 UDP，打洞必失败
 

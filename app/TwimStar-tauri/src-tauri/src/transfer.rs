@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
@@ -68,7 +68,21 @@ pub struct FileMeta {
     pub fingerprint: String,
     /// 完整性校验用：整文件 SHA-256（hex）
     pub sha256: String,
+    /// 分块并行传输的块数。`0` 表示整文件走单条流（小文件 / 续传场景）；
+    /// `>0` 表示把文件切成 N 块，每块各开一条 QUIC 流并发发送，
+    /// 专门用来在高 RTT / 中继链路上吃满带宽（单流会被流控窗口卡死）。
+    #[serde(default)]
+    pub chunks: u32,
 }
+
+/// 触发并行分块传输的体积门槛：小于这个就走单流（并行带来的建流开销不划算，
+/// 且小文件本来就传得快）。实测 16MiB 是个不错的拐点。
+pub const PARALLEL_THRESHOLD: u64 = 16 * 1024 * 1024;
+/// 并行块数。4 路并发在"长肥管道"上足够吃满窗口，再多会被 CPU / 磁盘 IO 反制。
+pub const PARALLEL_CHUNKS: u32 = 4;
+/// 续传起点响应的最高位作为能力协商位：新版接收端愿意接并行流时置位。
+/// 老版本只会返回普通 offset，因此新发送端会自动降级单流，不会与 v0.9.1 卡死。
+const PARALLEL_ACCEPTED: u64 = 1 << 63;
 
 #[derive(Serialize, Deserialize)]
 struct Sidecar {
@@ -176,7 +190,13 @@ pub fn build_meta_named(path: &Path, display: Option<&str>) -> Result<FileMeta> 
     } else {
         sha256_file(path)?
     };
-    Ok(FileMeta { name, size, fingerprint, sha256: digest })
+    Ok(FileMeta {
+        name,
+        size,
+        fingerprint,
+        sha256: digest,
+        chunks: 0,
+    })
 }
 
 /// 组装发送侧元数据（名字取源路径的 `file_name()`）。
@@ -208,7 +228,11 @@ where
     send_on_conn(&conn, path, opts, on_progress).await
 }
 
-/// 在已建立的连接上发送一个文件。
+/// 在已建立的连接上发送一个文件。按体积自动选传输方式：
+///
+/// - 续传（对端已存在匹配的 sidecar）→ 单流从断点续发
+/// - 大文件（≥ [`PARALLEL_THRESHOLD`]）→ N 路并行分块
+/// - 其余 → 单流顺序发
 ///
 /// 与拨号分开，是为了让调用方有机会先拿到通路信息（直连 / 中继）再决定怎么提示用户。
 pub async fn send_on_conn<F>(
@@ -221,17 +245,54 @@ where
     F: FnMut(u64, u64),
 {
     let meta = build_meta_named(path, opts.name.as_deref())?;
+    // 建议的块数：大文件并行，小文件单流。最终是否并行由对端决定（它知道自己有没有断点）。
+    let suggested = if meta.size >= PARALLEL_THRESHOLD {
+        PARALLEL_CHUNKS
+    } else {
+        0
+    };
+    let meta = FileMeta {
+        chunks: suggested,
+        ..meta
+    };
+
     let (mut send, mut recv) = conn.open_bi().await.context("打开数据通道失败")?;
 
     let meta_json = serde_json::to_vec(&meta)?;
     send.write_all(&(meta_json.len() as u32).to_le_bytes()).await?;
     send.write_all(&meta_json).await?;
 
-    // 对端告知续传起点
+    // 对端回的 u64 同时承载续传起点与能力位：
+    // - 高位为 1：接受并行分块（此时 offset 必须为 0）
+    // - 高位为 0：普通 offset；旧版接收端天然属于这一类，新端自动降级单流
     let mut off_buf = [0u8; 8];
     recv.read_exact(&mut off_buf).await.context("未收到续传起点")?;
-    let offset = u64::from_le_bytes(off_buf).min(meta.size);
+    let response = u64::from_le_bytes(off_buf);
+    let parallel_accepted = response & PARALLEL_ACCEPTED != 0;
+    let offset = (response & !PARALLEL_ACCEPTED).min(meta.size);
 
+    if parallel_accepted && offset == 0 && meta.chunks > 0 {
+        // —— 并行分块 ——
+        send_parallel(conn, &mut send, &mut recv, path, &meta, opts, &mut on_progress).await
+    } else {
+        // —— 单流（续传 / 小文件 / 旧版对端）——
+        send_single(&mut send, &mut recv, path, &meta, offset, opts, &mut on_progress).await
+    }
+}
+
+/// 单条流顺序发送（也承担续传）。`send`/`recv` 是已打开的控制双向流。
+async fn send_single<F>(
+    send: &mut iroh::endpoint::SendStream,
+    recv: &mut iroh::endpoint::RecvStream,
+    path: &Path,
+    meta: &FileMeta,
+    offset: u64,
+    opts: &SendOptions,
+    on_progress: &mut F,
+) -> Result<String>
+where
+    F: FnMut(u64, u64),
+{
     let mut file = tokio::fs::File::open(path).await?;
     if offset > 0 {
         file.seek(SeekFrom::Start(offset)).await?;
@@ -259,7 +320,7 @@ where
     //        数据已经完整送达，如实标注"未收到确认"，而不是报成错误。
     let ack: Option<String> = match tokio::time::timeout(ACK_TIMEOUT, async {
         let mut buf = Vec::new();
-        tokio::io::AsyncReadExt::read_to_end(&mut recv, &mut buf).await?;
+        tokio::io::AsyncReadExt::read_to_end(recv, &mut buf).await?;
         Ok::<_, std::io::Error>(buf)
     })
     .await
@@ -267,7 +328,111 @@ where
         Ok(Ok(buf)) => Some(String::from_utf8_lossy(&buf).to_string()),
         _ => None,
     };
+    finish_ack(meta, ack)
+}
 
+/// 并行分块发送：控制双向流只承载元数据 / 能力协商 / 最终回执，文件数据走 N 条单向流。
+async fn send_parallel<F>(
+    conn: &Connection,
+    control_send: &mut iroh::endpoint::SendStream,
+    control_recv: &mut iroh::endpoint::RecvStream,
+    path: &Path,
+    meta: &FileMeta,
+    opts: &SendOptions,
+    on_progress: &mut F,
+) -> Result<String>
+where
+    F: FnMut(u64, u64),
+{
+    const CHUNK_MAGIC: &[u8; 4] = b"TSC1";
+
+    // 控制流不会再承载文件正文，尽早关发送半边；接收半边继续等最终 ACK。
+    control_send.shutdown().await?;
+
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for index in 0..meta.chunks {
+        let (start, len) = chunk_range(meta.size, meta.chunks, index)
+            .ok_or_else(|| anyhow::anyhow!("并行分块范围异常：{index}/{}", meta.chunks))?;
+        let conn = conn.clone();
+        let path = path.to_path_buf();
+        let cancel = opts.cancel.clone();
+        let progress_tx = progress_tx.clone();
+        tasks.spawn(async move {
+            let mut stream = conn.open_uni().await.context("打开并行数据流失败")?;
+            stream.write_all(CHUNK_MAGIC).await?;
+            stream.write_all(&index.to_le_bytes()).await?;
+            stream.write_all(&start.to_le_bytes()).await?;
+            stream.write_all(&len.to_le_bytes()).await?;
+
+            let mut file = tokio::fs::File::open(&path).await?;
+            file.seek(SeekFrom::Start(start)).await?;
+            let mut remaining = len;
+            let mut buf = vec![0u8; CHUNK];
+            while remaining > 0 {
+                if cancel
+                    .as_ref()
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!("已取消发送");
+                }
+                let want = (remaining as usize).min(CHUNK);
+                let n = file.read(&mut buf[..want]).await?;
+                if n == 0 {
+                    anyhow::bail!("源文件提前结束：分块 {index} 尚余 {remaining} 字节");
+                }
+                stream.write_all(&buf[..n]).await?;
+                remaining -= n as u64;
+                let _ = progress_tx.send(n as u64);
+            }
+            stream.shutdown().await?;
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+    drop(progress_tx);
+
+    let mut sent = 0u64;
+    while let Some(delta) = progress_rx.recv().await {
+        sent = sent.saturating_add(delta).min(meta.size);
+        on_progress(sent, meta.size);
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.context("并行发送任务异常")??;
+    }
+
+    let ack = read_ack(control_recv).await;
+    finish_ack(meta, ack)
+}
+
+/// 把文件均匀切成 `chunks` 段，最后一段吸收余数。
+fn chunk_range(size: u64, chunks: u32, index: u32) -> Option<(u64, u64)> {
+    if chunks == 0 || index >= chunks || size == 0 {
+        return None;
+    }
+    let width = size.div_ceil(chunks as u64);
+    let start = width.checked_mul(index as u64)?;
+    if start >= size {
+        return None;
+    }
+    Some((start, width.min(size - start)))
+}
+
+async fn read_ack(recv: &mut iroh::endpoint::RecvStream) -> Option<String> {
+    match tokio::time::timeout(ACK_TIMEOUT, async {
+        let mut buf = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(recv, &mut buf).await?;
+        Ok::<_, std::io::Error>(buf)
+    })
+    .await
+    {
+        Ok(Ok(buf)) => Some(String::from_utf8_lossy(&buf).to_string()),
+        _ => None,
+    }
+}
+
+fn finish_ack(meta: &FileMeta, ack: Option<String>) -> Result<String> {
     match ack {
         Some(a) if a.starts_with("OK") => {
             Ok(format!("发送完成：{}（{} 字节）", meta.name, meta.size))
@@ -299,7 +464,7 @@ pub async fn handle_one(
     on_progress: impl FnMut(&str, u64, u64),
 ) -> Result<String> {
     let (send, recv) = conn.accept_bi().await.context("接受数据通道失败")?;
-    handle_stream(send, recv, save_dir, cancel, on_progress).await
+    handle_stream(conn, send, recv, save_dir, cancel, on_progress).await
 }
 
 /// 独立连接模式：收完一个文件就随连接一起释放（测试与一次性场景用）。
@@ -350,8 +515,15 @@ pub async fn handle_session_idle(
         }
         match tokio::time::timeout(idle, conn.accept_bi()).await {
             Ok(Ok((send, recv))) => {
-                let msg =
-                    handle_stream(send, recv, save_dir, cancel.clone(), &mut on_progress).await?;
+                let msg = handle_stream(
+                    conn,
+                    send,
+                    recv,
+                    save_dir,
+                    cancel.clone(),
+                    &mut on_progress,
+                )
+                .await?;
                 files += 1;
                 on_file(msg);
             }
@@ -369,6 +541,7 @@ pub async fn handle_session_idle(
 
 /// 接收单个双向流：`元数据 → 回续传起点 → 收数据 → 校验 → 回执`。
 async fn handle_stream(
+    conn: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     save_dir: &Path,
@@ -418,77 +591,37 @@ async fn handle_stream(
     }
     .min(meta.size);
 
-    // 立刻回续传起点，并落 sidecar（进程中断后仍可续）
-    send.write_all(&resume.to_le_bytes()).await?;
+    // 立刻回续传起点 / 能力协商，并落 sidecar（进程中断后仍可续）。
+    // 只有全新文件才启用并行；已有断点继续走单流，保持廉价可靠的续传语义。
+    let parallel = resume == 0 && meta.chunks > 0 && meta.chunks <= PARALLEL_CHUNKS;
+    let response = if parallel {
+        PARALLEL_ACCEPTED
+    } else {
+        resume
+    };
+    send.write_all(&response.to_le_bytes()).await?;
     write_sidecar(&final_path, meta.size, &meta.fingerprint)?;
 
-    // 4) 收数据写入 .part，同时流式累计 SHA-256
-    //    —— 边收边算，收完即校验，避免落盘后再把整个文件重读一遍
-    //       （传 10GB 文件时那就是两次完整磁盘读取，I/O 直接翻倍）。
-    let mut hasher = Sha256::new();
-    if resume > 0 {
-        // 续传：先把已落盘的 .part 前 resume 字节喂进 hasher，
-        // 保证最终哈希覆盖的是"完整文件"，而不是只覆盖这一段的增量。
-        let mut seeded = 0u64;
-        let mut f = std::fs::File::open(&part).context("读取续传基线失败")?;
-        let mut sbuf = vec![0u8; CHUNK];
-        while seeded < resume {
-            let want = ((resume - seeded) as usize).min(CHUNK);
-            let n = std::io::Read::read(&mut f, &mut sbuf[..want])
-                .context("读取续传基线失败")?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&sbuf[..n]);
-            seeded += n as u64;
-        }
-    }
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .open(&part)
-        .await
-        .context("无法创建落盘文件")?;
-    if resume > 0 {
-        file.seek(SeekFrom::Start(resume)).await?;
-    }
-    let mut received = resume;
-    let mut buf = vec![0u8; CHUNK];
-    while let Some(n) = recv.read(&mut buf).await? {
-        // iroh 的 read 用 Option 表示流结束；某些实现会先给 Some(0) 再给 None，
-        // 这里的 n == 0 兜底是必须的，否则空转打满一个核。
-        if n == 0 {
-            break;
-        }
-        if cancel
-            .as_ref()
-            .map(|c| c.load(Ordering::Relaxed))
-            .unwrap_or(false)
-        {
-            anyhow::bail!("已取消接收");
-        }
-        file.write_all(&buf[..n]).await?;
-        hasher.update(&buf[..n]);
-        received += n as u64;
-        on_progress(&meta.name, received, meta.size);
-    }
-    file.flush().await?;
-    // 拿回 std 的 File 再同步 drop：tokio 的 File 是在阻塞线程池里异步关闭句柄的，
-    // 直接 drop 就 rename 在 Windows 上会撞 "文件被占用"。
-    let std_file = file.into_std().await;
-    drop(std_file);
+    // 4) 收数据写入 .part。
+    let received = if parallel {
+        receive_parallel(conn, &part, &meta, cancel.clone(), &mut on_progress).await?
+    } else {
+        receive_single(&mut recv, &part, &meta, resume, cancel.clone(), &mut on_progress).await?
+    };
 
-    // 5) 完整性校验 → 转正 or 删除
+    // 5) 完整性校验 → 转正 or 删除。
+    // 单流原先能边收边算 SHA；并行块到达顺序不固定，统一在全部落盘后顺序哈希。
+    // 这会多一次磁盘读取，但换来高 RTT 链路的吞吐；大文件发送侧本来也会预先算 SHA。
     if received != meta.size {
         let _ = send.write_all(format!("ERR:大小不符 {}≠{}", received, meta.size).as_bytes()).await;
         anyhow::bail!("大小不符：收到 {} / 应为 {}", received, meta.size);
     }
-    // 流式哈希已经覆盖了全部收到字节（含续传基线），直接收口比较。
-    let actual = hex::encode(hasher.finalize());
+    let actual = sha256_file(&part)?;
     if actual != meta.sha256 {
         let _ = std::fs::remove_file(&part);
-        let _ = send.write_all(format!("ERR:SHA256 不一致").as_bytes()).await;
+        let _ = send
+            .write_all("ERR:SHA256 不一致".as_bytes())
+            .await;
         anyhow::bail!("完整性校验失败，已删除损坏文件");
     }
     std::fs::rename(&part, &final_path).context("转正文件失败")?;
@@ -505,6 +638,143 @@ async fn handle_stream(
         meta.size,
         final_path.display()
     ))
+}
+
+async fn receive_single<F>(
+    recv: &mut iroh::endpoint::RecvStream,
+    part: &Path,
+    meta: &FileMeta,
+    resume: u64,
+    cancel: Option<Arc<AtomicBool>>,
+    on_progress: &mut F,
+) -> Result<u64>
+where
+    F: FnMut(&str, u64, u64),
+{
+    let mut file = tokio::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(part)
+        .await
+        .context("无法创建落盘文件")?;
+    file.set_len(resume).await?;
+    file.seek(SeekFrom::Start(resume)).await?;
+
+    let mut received = resume;
+    let mut buf = vec![0u8; CHUNK];
+    while let Some(n) = recv.read(&mut buf).await? {
+        if n == 0 {
+            break;
+        }
+        if cancel
+            .as_ref()
+            .map(|c| c.load(Ordering::Relaxed))
+            .unwrap_or(false)
+        {
+            anyhow::bail!("已取消接收");
+        }
+        file.write_all(&buf[..n]).await?;
+        received += n as u64;
+        on_progress(&meta.name, received, meta.size);
+    }
+    file.flush().await?;
+    let std_file = file.into_std().await;
+    drop(std_file);
+    Ok(received)
+}
+
+async fn receive_parallel<F>(
+    conn: &Connection,
+    part: &Path,
+    meta: &FileMeta,
+    cancel: Option<Arc<AtomicBool>>,
+    on_progress: &mut F,
+) -> Result<u64>
+where
+    F: FnMut(&str, u64, u64),
+{
+    const CHUNK_MAGIC: &[u8; 4] = b"TSC1";
+
+    // 预分配完整长度，各任务各持一个文件句柄并 seek 到自己的互斥区间。
+    let initial = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(part)
+        .await
+        .context("无法创建并行落盘文件")?;
+    initial.set_len(meta.size).await?;
+    drop(initial.into_std().await);
+
+    let total = Arc::new(AtomicU64::new(0));
+    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let mut tasks = tokio::task::JoinSet::new();
+
+    for _ in 0..meta.chunks {
+        let mut stream = conn.accept_uni().await.context("接受并行数据流失败")?;
+        let mut header = [0u8; 24];
+        stream.read_exact(&mut header).await.context("读取并行流头失败")?;
+        if &header[..4] != CHUNK_MAGIC {
+            anyhow::bail!("并行数据流标记错误");
+        }
+        let index = u32::from_le_bytes(header[4..8].try_into().unwrap());
+        let start = u64::from_le_bytes(header[8..16].try_into().unwrap());
+        let len = u64::from_le_bytes(header[16..24].try_into().unwrap());
+        let expected = chunk_range(meta.size, meta.chunks, index)
+            .ok_or_else(|| anyhow::anyhow!("并行分块编号异常：{index}"))?;
+        if (start, len) != expected {
+            anyhow::bail!("并行分块范围不符：#{index} ({start}, {len}) ≠ {expected:?}");
+        }
+
+        let part = part.to_path_buf();
+        let cancel = cancel.clone();
+        let progress_tx = progress_tx.clone();
+        let total = total.clone();
+        tasks.spawn(async move {
+            let mut file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .open(&part)
+                .await?;
+            file.seek(SeekFrom::Start(start)).await?;
+            let mut remaining = len;
+            let mut buf = vec![0u8; CHUNK];
+            while remaining > 0 {
+                if cancel
+                    .as_ref()
+                    .map(|c| c.load(Ordering::Relaxed))
+                    .unwrap_or(false)
+                {
+                    anyhow::bail!("已取消接收");
+                }
+                let n = stream.read(&mut buf).await?.unwrap_or(0);
+                if n == 0 {
+                    anyhow::bail!("并行分块 {index} 提前结束，尚余 {remaining} 字节");
+                }
+                if n as u64 > remaining {
+                    anyhow::bail!("并行分块 {index} 超出声明长度");
+                }
+                file.write_all(&buf[..n]).await?;
+                remaining -= n as u64;
+                total.fetch_add(n as u64, Ordering::Relaxed);
+                let _ = progress_tx.send(n as u64);
+            }
+            file.flush().await?;
+            drop(file.into_std().await);
+            Ok::<_, anyhow::Error>(())
+        });
+    }
+    drop(progress_tx);
+
+    let mut received = 0u64;
+    while let Some(delta) = progress_rx.recv().await {
+        received = received.saturating_add(delta).min(meta.size);
+        on_progress(&meta.name, received, meta.size);
+    }
+    while let Some(result) = tasks.join_next().await {
+        result.context("并行接收任务异常")??;
+    }
+    Ok(total.load(Ordering::Relaxed))
 }
 
 #[cfg(test)]
@@ -666,6 +936,68 @@ mod tests {
             !sidecar_path(&final_path).exists(),
             "成功后 sidecar 应被清理"
         );
+    }
+
+    #[test]
+    fn parallel_chunk_ranges_cover_file_exactly() {
+        let size = PARALLEL_THRESHOLD + 123;
+        let ranges: Vec<_> = (0..PARALLEL_CHUNKS)
+            .map(|i| chunk_range(size, PARALLEL_CHUNKS, i).unwrap())
+            .collect();
+        assert_eq!(ranges[0].0, 0);
+        for pair in ranges.windows(2) {
+            assert_eq!(pair[0].0 + pair[0].1, pair[1].0, "分块不能有缝或重叠");
+        }
+        let last = ranges.last().unwrap();
+        assert_eq!(last.0 + last.1, size);
+        assert_eq!(ranges.iter().map(|(_, len)| len).sum::<u64>(), size);
+        assert!(chunk_range(size, PARALLEL_CHUNKS, PARALLEL_CHUNKS).is_none());
+    }
+
+    #[test]
+    fn old_metadata_without_chunks_stays_compatible() {
+        let raw = r#"{"name":"old.bin","size":3,"fingerprint":"f","sha256":"s"}"#;
+        let meta: FileMeta = serde_json::from_str(raw).unwrap();
+        assert_eq!(meta.chunks, 0, "旧版元数据应默认走单流");
+    }
+
+    /// 大文件真实走 4 条单向流，接收后逐字节一致。
+    #[tokio::test]
+    async fn parallel_roundtrip_transfers_identical_bytes() {
+        let dir = scratch("parallel");
+        let src = dir.join("large.bin");
+        let size = PARALLEL_THRESHOLD as usize + 321_123;
+        let data: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+
+        let (server, client) = endpoint_pair().await;
+        let addr = loopback_addr(&server);
+        let save = scratch("parallel-save");
+        let save_for_task = save.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.accept().unwrap().await.unwrap();
+            let r = handle_incoming_with(conn, &save_for_task, None, |_, _, _| {}).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(server);
+            r
+        });
+
+        let mut last_progress = 0u64;
+        send_file(
+            &client,
+            addr,
+            TEST_ALPN,
+            &src,
+            &SendOptions::default(),
+            |sent, _| last_progress = sent,
+        )
+        .await
+        .expect("并行发送应成功");
+        server_task.await.unwrap().expect("并行接收应成功");
+
+        assert_eq!(last_progress, size as u64);
+        assert_eq!(std::fs::read(save.join("large.bin")).unwrap(), data);
     }
 
     /// 一次打洞、连传两个文件：第二条必须走同一条连接，不再重新拨号。

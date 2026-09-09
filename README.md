@@ -2,8 +2,8 @@
 
 零成本 P2P 文件传输软件 —— 局域网直连 / 跨网打洞 / 中继兜底，全程零服务器、零账号、免 VPN。
 
-**下载**：[TwimStar v0.9.0（Windows x64，22.0 MB）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.9.0/TwimStar-v0.9.0-win-x64.exe)
-SHA-256：`f146e5c24092246cac9f5e54d427a696c796fc040c38bc7268ee10ae1458ca18`
+**下载**：[TwimStar v0.9.1（Windows x64）](https://github.com/Ainxin-1/TwinStar2/releases/download/v0.9.1/TwimStar-v0.9.1-win-x64.exe)
+SHA-256：`a06869e034b469c012bac36063a76a0cc3608a6cff5ed716e98ecf71c3aef555`
 
 ## 特性
 

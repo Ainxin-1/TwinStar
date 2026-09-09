@@ -664,7 +664,13 @@ fn pick_folder() -> Option<String> {
     if let Some(p) = rfd::FileDialog::new().pick_folder() {
         let dir = p.display().to_string();
         *save_dir().lock().unwrap() = dir.clone();
-        return Some(dir);
+        // 持久化：重启后沿用该接收目录（写失败仅丢持久化，不影响本次会话）。
+        let cfg = Config {
+            download_dir: Some(dir),
+            ..Config::load()
+        };
+        let _ = cfg.save();
+        return save_dir().lock().unwrap().clone().into();
     }
     None
 }
@@ -852,7 +858,12 @@ fn reveal_file(app: AppHandle, name: String) -> Result<(), String> {
 // ---------------- 入口 ----------------
 
 fn main() {
-    let _ = SAVE_DIR.set(Arc::new(Mutex::new(default_save_dir())));
+    // 接收目录：优先用上次持久化的选择（目录仍存在才用），否则默认 Downloads。
+    let initial_save_dir = Config::load()
+        .download_dir
+        .filter(|d| std::path::Path::new(d).is_dir())
+        .unwrap_or_else(default_save_dir);
+    let _ = SAVE_DIR.set(Arc::new(Mutex::new(initial_save_dir)));
 
     tauri::Builder::default()
         .setup(|app| {

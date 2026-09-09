@@ -2,7 +2,7 @@
 
 Windows 桌面 P2P 文件传输工具。局域网直连、跨网 NAT 打洞、中继兜底，不设服务器、不需注册账号。
 
-**下载**：[TwinStar v0.10.0（Windows x64，约 23 MB）](https://github.com/Ainxin-1/TwinStar/releases/download/v0.10.0/TwinStar-v0.10.0-win-x64.exe)
+**下载**：[TwinStar v0.10.1（Windows x64，约 23 MB）](https://github.com/Ainxin-1/TwinStar/releases/download/v0.10.1/TwinStar-v0.10.1-win-x64.exe)
 
 > **协议兼容性**：v0.10.1 更换了局域网发现的广播魔数（`TWINSTAR-DISC-v1`），v0.10.0 更换了传输协议标识（ALPN `twinstar/1`）。与 v0.9.x 及更早版本**互不相通**；v0.10.1 与 v0.10.0 之间传输可用（连接码），但局域网广播互相发现不了。传输双方建议使用相同版本。
 
@@ -94,7 +94,7 @@ cargo build --release --features custom-protocol
 cargo test --release
 ```
 
-28 项单元 / 集成测试（含端到端传输、断点续传、并行分块、路径防御、连接码解析），另有 2 项真机网络自检 smoke 测试需真实网络环境，默认忽略：
+29 项单元 / 集成测试（含端到端传输、断点续传、并行分块、路径防御、连接码解析），另有 2 项真机网络自检 smoke 测试需真实网络环境，默认忽略：
 
 ```bash
 cargo test smoke_real_network_diag -- --ignored --nocapture

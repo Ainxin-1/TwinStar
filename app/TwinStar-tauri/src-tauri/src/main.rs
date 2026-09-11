@@ -26,7 +26,7 @@ use crate::core::config::Config;
 use crate::core::identity::DeviceIdentity;
 use crate::core::path::format_size;
 use crate::net::ALPN;
-use crate::transfer::SendOptions;
+use crate::transfer::{Gate, GateDecision, GateRequest, SendOptions};
 
 mod core;
 mod disc;
@@ -52,6 +52,14 @@ static ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
 static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
 /// 已建好的连接缓存（按对端 id）。打洞一次不容易，能复用就复用。
 static CONNS: OnceLock<Arc<Mutex<HashMap<String, Connection>>>> = OnceLock::new();
+/// 待用户裁决的接收确认：对端 id → 结果回传通道。
+/// 同一对端的新请求会顶掉旧的（旧通道自然作废）。
+static PENDING_RECV: OnceLock<Mutex<HashMap<String, tokio::sync::oneshot::Sender<(bool, bool)>>>> =
+    OnceLock::new();
+
+fn pending_recv() -> &'static Mutex<HashMap<String, tokio::sync::oneshot::Sender<(bool, bool)>>> {
+    PENDING_RECV.get_or_init(|| Mutex::new(HashMap::new()))
+}
 
 fn save_dir() -> Arc<Mutex<String>> {
     SAVE_DIR.get().unwrap().clone()
@@ -167,6 +175,94 @@ struct SendItem {
     path: String,
     name: String,
     size: u64,
+}
+
+/// 接收确认弹窗的展示信息（`recv-request` 事件载荷）。
+#[derive(Serialize, Clone)]
+struct RecvRequestView {
+    peer_id: String,
+    peer_name: String,
+    file_name: String,
+    file_size: u64,
+    save_dir: String,
+}
+
+/// 弹窗等人最长时间：超时按拒绝处理，别把对端的连接吊死。
+const RECV_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// 本机昵称（发送时编进元数据）。
+fn nickname() -> String {
+    Config::load().nickname
+}
+
+/// 构造接收确认门：已信任设备直接放行；陌生设备发 `recv-request` 事件弹窗，
+/// 等前端经 `respond_recv_request` 回传裁决。
+fn recv_gate(app: AppHandle) -> Gate {
+    Arc::new(move |req: GateRequest| {
+        let app = app.clone();
+        Box::pin(async move {
+            // 信任名单里的设备：自动接收，不打扰。
+            if Config::load().is_trusted(&req.peer_id) {
+                return GateDecision::Allow;
+            }
+            let view = RecvRequestView {
+                peer_id: req.peer_id.clone(),
+                // 旧版对端没有昵称字段，回退到连接码短哈希。
+                peer_name: if req.peer_name.trim().is_empty() {
+                    let short = |s: &str| s.chars().take(8).collect::<String>();
+                    format!("未知设备（{}…）", short(&req.peer_id))
+                } else {
+                    req.peer_name.clone()
+                },
+                file_name: req.file_name,
+                file_size: req.file_size,
+                save_dir: req.save_dir,
+            };
+            let (tx, rx) = tokio::sync::oneshot::channel::<(bool, bool)>();
+            pending_recv().lock().unwrap().insert(req.peer_id.clone(), tx);
+            let _ = app.emit("recv-request", &view);
+            let _ = app.emit(
+                "log",
+                format!(
+                    "⚠️ {} 请求发送文件「{}」（{}），等待确认",
+                    view.peer_name,
+                    view.file_name,
+                    format_size(view.file_size)
+                ),
+            );
+
+            let decision = match tokio::time::timeout(RECV_REQUEST_TIMEOUT, rx).await {
+                Ok(Ok((allow, remember))) => {
+                    if allow && remember {
+                        let mut cfg = Config::load();
+                        cfg.trust_device(&req.peer_id);
+                        if cfg.save().is_ok() {
+                            let _ = app.emit("log", format!("🔗 已记住设备 {}（{}），后续传输自动接收", view.peer_name, req.peer_id));
+                        }
+                    }
+                    if allow {
+                        let _ = app.emit("log", format!("✅ 已允许 {}: {}", view.peer_name, view.file_name));
+                        if remember {
+                            GateDecision::AllowRemember
+                        } else {
+                            GateDecision::Allow
+                        }
+                    } else {
+                        let _ = app.emit("log", format!("🚫 已拒绝 {} 的传输请求（{}）", view.peer_name, view.file_name));
+                        GateDecision::Reject
+                    }
+                }
+                // 用户没理（超时）或弹窗被关闭：按拒绝处理，并通知前端收起弹窗。
+                _ => {
+                    pending_recv().lock().unwrap().remove(&req.peer_id);
+                    let _ = app.emit("recv-request-closed", &req.peer_id);
+                    let _ = app.emit("log", "⌛ 接收确认超时，已按拒绝处理");
+                    GateDecision::Reject
+                }
+            };
+            decision
+        })
+    })
 }
 
 /// 滑动窗口速率表：取最近 800ms 的斜率，比"总量/总时长"更能反映当下网速。
@@ -304,6 +400,7 @@ async fn send_batch(
     flag: &Arc<AtomicBool>,
 ) -> Result<usize> {
     let count = items.len();
+    let nick = nickname();
     for (index, item) in items.iter().enumerate() {
         if flag.load(Ordering::Relaxed) {
             anyhow::bail!("已取消发送");
@@ -312,6 +409,7 @@ async fn send_batch(
             wait_direct: Duration::ZERO,
             cancel: Some(flag.clone()),
             name: Some(item.name.clone()),
+            sender: Some(nick.clone()),
         };
         if let Err(e) = send_with_progress(
             app,
@@ -490,10 +588,12 @@ async fn do_recv(app: AppHandle, conn: iroh::endpoint::Connection, dir: PathBuf)
         let app_prog = app.clone();
         let app_file = app.clone();
         let start_for_file = started_at.clone();
+        let gate = recv_gate(app.clone());
         transfer::handle_session(
             &conn,
             Path::new(&dir),
             Some(flag),
+            gate,
             move |name, got, total| {
                 let mut slot = start_for_file.lock().unwrap();
                 if slot.is_none() {
@@ -734,6 +834,20 @@ fn refresh_diag(app: AppHandle) {
     });
 }
 
+/// 回传接收确认弹窗的裁决。`remember` 仅在 `allow` 时生效。
+#[tauri::command]
+fn respond_recv_request(peer_id: String, allow: bool, remember: bool) -> Result<(), String> {
+    let tx = pending_recv().lock().unwrap().remove(&peer_id);
+    match tx {
+        Some(tx) => {
+            // 接收端已超时关闭的话 send 会失败，忽略即可。
+            let _ = tx.send((allow, remember));
+            Ok(())
+        }
+        None => Err("没有待确认的接收请求".into()),
+    }
+}
+
 // ---------------- 我的文件 / 局域网设备 ----------------
 
 /// 接收目录里的文件清单（按修改时间倒序，跳过传输中的 .part / .twinmeta）。
@@ -930,6 +1044,7 @@ fn main() {
             start_send,
             cancel_send,
             refresh_diag,
+            respond_recv_request,
             my_addr_code,
             get_save_dir,
             list_files,

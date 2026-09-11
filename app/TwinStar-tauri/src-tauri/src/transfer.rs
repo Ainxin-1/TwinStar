@@ -38,6 +38,8 @@ pub struct SendOptions {
     /// 对端看到的文件名。默认取源路径的 `file_name()`；
     /// 传整个文件夹时用相对路径（如 `照片/北京/1.jpg`），让对方保留目录结构。
     pub name: Option<String>,
+    /// 本机昵称，编进元数据让接收方确认弹窗能显示"谁在发"。
+    pub sender: Option<String>,
 }
 
 impl SendOptions {
@@ -73,6 +75,10 @@ pub struct FileMeta {
     /// 专门用来在高 RTT / 中继链路上吃满带宽（单流会被流控窗口卡死）。
     #[serde(default)]
     pub chunks: u32,
+    /// 发送方昵称（确认弹窗展示用）。旧版发送方没有这个字段，反序列化时缺省为空串，
+    /// 接收端展示时回退到连接码短哈希，保证与 v0.10.x 互通。
+    #[serde(default)]
+    pub sender: String,
 }
 
 /// 触发并行分块传输的体积门槛：小于这个就走单流（并行带来的建流开销不划算，
@@ -83,6 +89,11 @@ pub const PARALLEL_CHUNKS: u32 = 4;
 /// 续传起点响应的最高位作为能力协商位：新版接收端愿意接并行流时置位。
 /// 老版本只会返回普通 offset，因此新发送端会自动降级单流，不会与 v0.9.1 卡死。
 const PARALLEL_ACCEPTED: u64 = 1 << 63;
+/// 次高位作为"接收方拒绝"位：确认门拒绝时置位（offset 位全 0）。
+///
+/// 新发送端读到该位立即报"对方已拒绝"；老发送端会把它当超大 offset 钳到文件末尾，
+/// 一个字节都发不出去，随后读到 ERR 文案，同样得到明确的失败原因——不会误报成功。
+const REJECTED: u64 = 1 << 62;
 
 #[derive(Serialize, Deserialize)]
 struct Sidecar {
@@ -170,7 +181,8 @@ fn mtime_ms(path: &Path) -> i64 {
 /// 组装发送侧元数据（顺带算好指纹与整文件摘要）。
 ///
 /// `display` 为 `Some` 时用它当对端看到的名字，否则取源路径的 `file_name()`。
-pub fn build_meta_named(path: &Path, display: Option<&str>) -> Result<FileMeta> {
+/// `sender` 是本机昵称，接收方确认弹窗展示用；传 `None` 记为空串（旧版语义）。
+pub fn build_meta_named(path: &Path, display: Option<&str>, sender: Option<&str>) -> Result<FileMeta> {
     let size = std::fs::metadata(path)?.len();
     let name = match display {
         Some(n) if !n.trim().is_empty() => n.to_string(),
@@ -196,6 +208,7 @@ pub fn build_meta_named(path: &Path, display: Option<&str>) -> Result<FileMeta> 
         fingerprint,
         sha256: digest,
         chunks: 0,
+        sender: sender.unwrap_or_default().to_string(),
     })
 }
 
@@ -239,7 +252,7 @@ pub async fn send_on_conn<F>(
 where
     F: FnMut(u64, u64),
 {
-    let meta = build_meta_named(path, opts.name.as_deref())?;
+    let meta = build_meta_named(path, opts.name.as_deref(), opts.sender.as_deref())?;
     // 建议的块数：大文件并行，小文件单流。最终是否并行由对端决定（它知道自己有没有断点）。
     let suggested = if meta.size >= PARALLEL_THRESHOLD {
         PARALLEL_CHUNKS
@@ -257,12 +270,16 @@ where
     send.write_all(&(meta_json.len() as u32).to_le_bytes()).await?;
     send.write_all(&meta_json).await?;
 
-    // 对端回的 u64 同时承载续传起点与能力位：
-    // - 高位为 1：接受并行分块（此时 offset 必须为 0）
-    // - 高位为 0：普通 offset；旧版接收端天然属于这一类，新端自动降级单流
+    // 对端回的 u64 同时承载续传起点、能力位与拒绝位：
+    // - 最高位为 1：接受并行分块（此时 offset 必须为 0）
+    // - 次高位为 1：对方拒绝本次传输（接收方确认门不放行）
+    // - 其余为普通 offset；旧版接收端天然属于这一类，新端自动降级单流
     let mut off_buf = [0u8; 8];
     recv.read_exact(&mut off_buf).await.context("未收到续传起点")?;
     let response = u64::from_le_bytes(off_buf);
+    if response & REJECTED != 0 {
+        anyhow::bail!("对方已拒绝本次传输");
+    }
     let parallel_accepted = response & PARALLEL_ACCEPTED != 0;
     let offset = (response & !PARALLEL_ACCEPTED).min(meta.size);
 
@@ -449,6 +466,89 @@ fn finish_ack(meta: &FileMeta, ack: Option<String>) -> Result<String> {
 /// 撑到下一次发送到来；太久没动静再释放，免得白占资源。
 pub const SESSION_IDLE: Duration = Duration::from_secs(120);
 
+// ---- 接收确认门（陌生设备首次传输须人工放行）----
+
+/// 一次确认请求的裁决结果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateDecision {
+    /// 允许本次及本连接后续传输。
+    Allow,
+    /// 允许并记住该设备（宿主负责持久化信任名单）。
+    AllowRemember,
+    /// 拒绝：不写入任何文件，连接关闭。
+    Reject,
+}
+
+/// 确认弹窗需要展示的信息（不含文件内容，符合日志/弹窗不带隐私正文的约定）。
+#[derive(Debug, Clone)]
+pub struct GateRequest {
+    /// 对端连接码 id（hex）。
+    pub peer_id: String,
+    /// 对端昵称（元数据携带；旧版对端为空串时由宿主回退显示）。
+    pub peer_name: String,
+    /// 文件名（批量传文件夹时为首个文件的相对路径）。
+    pub file_name: String,
+    /// 文件大小（字节）。
+    pub file_size: u64,
+    /// 预计接收位置（接收目录）。
+    pub save_dir: String,
+}
+
+/// 异步裁决回调返回的 future。
+pub type GateFuture = std::pin::Pin<Box<dyn std::future::Future<Output = GateDecision> + Send>>;
+/// 宿主注入的确认回调：弹窗等人 / 查信任名单，由 GUI 层实现。
+pub type Gate = Arc<dyn Fn(GateRequest) -> GateFuture + Send + Sync>;
+
+/// "用户拒绝了"的哨兵错误：会话循环据此安静收工，不当成链路故障。
+#[derive(Debug)]
+struct RejectError;
+impl std::fmt::Display for RejectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("已拒绝对方传输")
+    }
+}
+impl std::error::Error for RejectError {}
+
+/// 连接级确认门：一条连接（一次传输会话）只问一次，其余文件沿用裁决。
+struct SessionGate {
+    inner: Option<Gate>,
+    peer_id: String,
+    decision: tokio::sync::Mutex<Option<GateDecision>>,
+}
+
+impl SessionGate {
+    fn new(inner: Option<Gate>, peer_id: String) -> Self {
+        Self {
+            inner,
+            peer_id,
+            decision: tokio::sync::Mutex::new(None),
+        }
+    }
+
+    /// 元数据到手、**动第一块磁盘之前**调用。`false` 表示拒绝。
+    async fn check(&self, peer_name: &str, file_name: &str, file_size: u64, save_dir: &Path) -> bool {
+        let Some(gate) = &self.inner else {
+            return true; // 无宿主（测试 / 无 UI 场景）：保持原有自动接收语义
+        };
+        let mut slot = self.decision.lock().await;
+        match *slot {
+            Some(GateDecision::Allow | GateDecision::AllowRemember) => return true,
+            Some(GateDecision::Reject) => return false,
+            None => {}
+        }
+        let req = GateRequest {
+            peer_id: self.peer_id.clone(),
+            peer_name: peer_name.to_string(),
+            file_name: file_name.to_string(),
+            file_size,
+            save_dir: save_dir.display().to_string(),
+        };
+        let decision = gate(req).await;
+        *slot = Some(decision);
+        !matches!(decision, GateDecision::Reject)
+    }
+}
+
 /// 接收一个文件（连接由调用方持有，可继续复用）。
 // 生产路径走 handle_session，这两个入口主要给测试与一次性场景用。
 #[allow(dead_code)]
@@ -459,7 +559,7 @@ pub async fn handle_one(
     on_progress: impl FnMut(&str, u64, u64),
 ) -> Result<String> {
     let (send, recv) = conn.accept_bi().await.context("接受数据通道失败")?;
-    handle_stream(conn, send, recv, save_dir, cancel, on_progress).await
+    handle_stream(conn, send, recv, save_dir, cancel, None, on_progress).await
 }
 
 /// 独立连接模式：收完一个文件就随连接一起释放（测试与一次性场景用）。
@@ -476,23 +576,60 @@ pub async fn handle_incoming_with(
 /// 在同一条连接上连续接收多个文件，直到对端不再发或空闲超时。
 ///
 /// 配合发送侧的连接复用，实现"一次打洞、多次传输"。
+/// `gate` 是接收确认回调：陌生设备**首个文件**会先过这道门（弹窗等人），
+/// 放行后同连接后续文件不再重复询问；拒绝则整个会话结束、不落任何字节。
 /// 返回成功接收的文件数；一个都没收到时把首个错误抛出去。
 pub async fn handle_session(
     conn: &Connection,
     save_dir: &Path,
     cancel: Option<Arc<AtomicBool>>,
+    gate: Gate,
     on_progress: impl FnMut(&str, u64, u64),
     on_file: impl FnMut(String),
 ) -> Result<usize> {
-    handle_session_idle(conn, save_dir, SESSION_IDLE, cancel, on_progress, on_file).await
+    let peer_id = conn.remote_id().to_string();
+    let sg = SessionGate::new(Some(gate), peer_id);
+    handle_session_idle_with(
+        conn,
+        save_dir,
+        SESSION_IDLE,
+        cancel,
+        Some(&sg),
+        on_progress,
+        on_file,
+    )
+    .await
 }
 
 /// 与 [`handle_session`] 相同，但空闲时长可指定（测试用短超时，免得干等）。
+#[allow(dead_code)]
 pub async fn handle_session_idle(
     conn: &Connection,
     save_dir: &Path,
     idle: Duration,
     cancel: Option<Arc<AtomicBool>>,
+    on_progress: impl FnMut(&str, u64, u64),
+    on_file: impl FnMut(String),
+) -> Result<usize> {
+    handle_session_idle_with(
+        conn,
+        save_dir,
+        idle,
+        cancel,
+        None,
+        on_progress,
+        on_file,
+    )
+    .await
+}
+
+/// 会话循环本体。`gate` 为 `Some` 时启用确认门。
+async fn handle_session_idle_with(
+    conn: &Connection,
+    save_dir: &Path,
+    idle: Duration,
+    cancel: Option<Arc<AtomicBool>>,
+    gate: Option<&SessionGate>,
     mut on_progress: impl FnMut(&str, u64, u64),
     mut on_file: impl FnMut(String),
 ) -> Result<usize> {
@@ -510,17 +647,30 @@ pub async fn handle_session_idle(
         }
         match tokio::time::timeout(idle, conn.accept_bi()).await {
             Ok(Ok((send, recv))) => {
-                let msg = handle_stream(
+                match handle_stream(
                     conn,
                     send,
                     recv,
                     save_dir,
                     cancel.clone(),
+                    gate,
                     &mut on_progress,
                 )
-                .await?;
-                files += 1;
-                on_file(msg);
+                .await
+                {
+                    Ok(msg) => {
+                        files += 1;
+                        on_file(msg);
+                    }
+                    // 用户拒绝：这是正常收工，不是链路故障。已收文件照算。
+                    Err(e) if e.is::<RejectError>() => break,
+                    Err(e) => {
+                        if files == 0 {
+                            return Err(e).context("接受数据通道失败");
+                        }
+                        break; // 连接断了，已收的文件照算
+                    }
+                }
             }
             Ok(Err(e)) => {
                 if files == 0 {
@@ -534,13 +684,14 @@ pub async fn handle_session_idle(
     Ok(files)
 }
 
-/// 接收单个双向流：`元数据 → 回续传起点 → 收数据 → 校验 → 回执`。
+/// 接收单个双向流：`元数据 → [确认门] → 回续传起点 → 收数据 → 校验 → 回执`。
 async fn handle_stream(
     conn: &Connection,
     mut send: iroh::endpoint::SendStream,
     mut recv: iroh::endpoint::RecvStream,
     save_dir: &Path,
     cancel: Option<Arc<AtomicBool>>,
+    gate: Option<&SessionGate>,
     mut on_progress: impl FnMut(&str, u64, u64),
 ) -> Result<String> {
     // 1) 元数据
@@ -554,7 +705,24 @@ async fn handle_stream(
     recv.read_exact(&mut meta_buf).await?;
     let meta: FileMeta = serde_json::from_slice(&meta_buf).context("解析元数据失败")?;
 
-    // 2) 落盘路径：安全校验 + 不覆盖已有文件
+    // 2) 确认门：陌生设备首个文件必须等人放行。
+    //    必须在动任何磁盘（建目录 / .part / sidecar）之前裁决，
+    //    拒绝路径才能做到"零落盘"。
+    if let Some(g) = gate {
+        if !g
+            .check(&meta.sender, &meta.name, meta.size, save_dir)
+            .await
+        {
+            // 回执：REJECTED 位（老端会钳成"不发数据"）+ 明确文案。
+            // shutdown 让发送端立刻拿到错误，而不是对着半开的流干等。
+            let _ = send.write_all(&REJECTED.to_le_bytes()).await;
+            let _ = send.write_all("ERR:对方已拒绝本次传输".as_bytes()).await;
+            let _ = send.shutdown().await;
+            return Err(anyhow::Error::new(RejectError).context("已拒绝对方的传输请求"));
+        }
+    }
+
+    // 3) 落盘路径：安全校验 + 不覆盖已有文件
     validate_relative(&meta.name).map_err(|e| anyhow::anyhow!("文件名非法：{}", e))?;
     let safe = sanitize_relative(&meta.name);
     let mut final_path = save_dir.join(&safe);
@@ -574,7 +742,7 @@ async fn handle_stream(
         anyhow::bail!("临时文件路径越出下载目录");
     }
 
-    // 3) 续传判定：sidecar 指纹一致才续
+    // 4) 续传判定：sidecar 指纹一致才续
     let sidecar_ok = read_sidecar(&final_path)
         .map(|sc| sc.fingerprint == meta.fingerprint)
         .unwrap_or(false);
@@ -597,14 +765,14 @@ async fn handle_stream(
     send.write_all(&response.to_le_bytes()).await?;
     write_sidecar(&final_path, meta.size, &meta.fingerprint)?;
 
-    // 4) 收数据写入 .part。
+    // 5) 收数据写入 .part。
     let received = if parallel {
         receive_parallel(conn, &part, &meta, cancel.clone(), &mut on_progress).await?
     } else {
         receive_single(&mut recv, &part, &meta, resume, cancel.clone(), &mut on_progress).await?
     };
 
-    // 5) 完整性校验 → 转正 or 删除。
+    // 6) 完整性校验 → 转正 or 删除。
     // 单流原先能边收边算 SHA；并行块到达顺序不固定，统一在全部落盘后顺序哈希。
     // 这会多一次磁盘读取，但换来高 RTT 链路的吞吐；大文件发送侧本来也会预先算 SHA。
     if received != meta.size {
@@ -905,7 +1073,7 @@ mod tests {
         let part = part_path(&final_path);
         std::fs::write(&part, &data[..half]).unwrap();
 
-        let meta = build_meta_named(&src, None).unwrap();
+        let meta = build_meta_named(&src, None, None).unwrap();
         write_sidecar(&final_path, meta.size, &meta.fingerprint).unwrap();
 
         let (server, client) = endpoint_pair().await;
@@ -954,6 +1122,223 @@ mod tests {
         let raw = r#"{"name":"old.bin","size":3,"fingerprint":"f","sha256":"s"}"#;
         let meta: FileMeta = serde_json::from_str(raw).unwrap();
         assert_eq!(meta.chunks, 0, "旧版元数据应默认走单流");
+        assert_eq!(meta.sender, "", "旧版元数据没有昵称字段，应缺省为空串");
+    }
+
+    #[test]
+    fn metadata_sender_roundtrip_and_old_reader_compatibility() {
+        // 新版元数据带昵称
+        let m = FileMeta {
+            name: "a.bin".into(),
+            size: 3,
+            fingerprint: "f".into(),
+            sha256: "s".into(),
+            chunks: 0,
+            sender: "我的笔记本".into(),
+        };
+        let raw = serde_json::to_string(&m).unwrap();
+        let back: FileMeta = serde_json::from_str(&raw).unwrap();
+        assert_eq!(back.sender, "我的笔记本");
+        // 旧版接收端（serde 默认忽略未知字段）不会被新字段噎住
+        #[derive(serde::Deserialize)]
+        struct OldMetaOnly {
+            name: String,
+        }
+        let old: OldMetaOnly = serde_json::from_str(&raw).unwrap();
+        assert_eq!(old.name, "a.bin");
+    }
+
+    /// 确认门拒绝：发送端收到明确错误，接收端零落盘（无 .part / .twinmeta / 目录）。
+    #[tokio::test]
+    async fn reject_leaves_no_files_and_reports_clear_error() {
+        let dir = scratch("reject");
+        let src = dir.join("secret.bin");
+        let data: Vec<u8> = (0..100_000u32).map(|i| (i % 13) as u8).collect();
+        std::fs::write(&src, &data).unwrap();
+
+        let (server, client) = endpoint_pair().await;
+        let addr = loopback_addr(&server);
+        let save = scratch("reject-save");
+
+        let gate_calls = Arc::new(AtomicU64::new(0));
+        let calls_for_gate = gate_calls.clone();
+        let gate: Gate = Arc::new(move |req: GateRequest| {
+            calls_for_gate.fetch_add(1, Ordering::Relaxed);
+            assert_eq!(req.file_name, "secret.bin");
+            assert_eq!(req.file_size, data.len() as u64);
+            Box::pin(async { GateDecision::Reject })
+        });
+
+        let save_for_task = save.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.accept().unwrap().await.unwrap();
+            let r = handle_session(&conn, &save_for_task, None, gate, |_, _, _| {}, |_| {}).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(server);
+            r
+        });
+
+        let sent = send_file(&client, addr, TEST_ALPN, &src, &SendOptions::default(), |_, _| {}).await;
+        assert!(sent.is_err(), "拒绝后发送端必须收到错误");
+        let err = format!("{:#}", sent.unwrap_err());
+        assert!(err.contains("拒绝"), "发送端错误应明确提到拒绝，实际：{err}");
+
+        let recv = server_task.await.unwrap();
+        assert_eq!(recv.unwrap_or(0), 0, "拒绝的文件不应计入接收数");
+        assert_eq!(gate_calls.load(Ordering::Relaxed), 1, "确认门只应被询问一次");
+        let mut leftover = 0;
+        for e in std::fs::read_dir(&save).unwrap().flatten() {
+            leftover += 1;
+            eprintln!("残留：{}", e.path().display());
+        }
+        assert_eq!(leftover, 0, "拒绝后接收目录必须为空（无 .part / .twinmeta）");
+    }
+
+    /// 确认门放行：一次询问、整条连接生效；"允许并记住"同样只问一次。
+    #[tokio::test]
+    async fn allow_remember_decision_roundtrip() {
+        let dir = scratch("allow");
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, vec![1u8; 90_000]).unwrap();
+        std::fs::write(&b, vec![2u8; 70_000]).unwrap();
+
+        let (server, client) = endpoint_pair().await;
+        let addr = loopback_addr(&server);
+        let save = scratch("allow-save");
+
+        let gate_calls = Arc::new(AtomicU64::new(0));
+        let calls_for_gate = gate_calls.clone();
+        let gate: Gate = Arc::new(move |req: GateRequest| {
+            calls_for_gate.fetch_add(1, Ordering::Relaxed);
+            assert!(!req.peer_id.is_empty(), "确认请求应带上对端 id");
+            assert!(!req.save_dir.is_empty(), "确认请求应带上接收目录");
+            Box::pin(async { GateDecision::AllowRemember })
+        });
+
+        let save_for_task = save.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.accept().unwrap().await.unwrap();
+            let r = handle_session(
+                &conn,
+                &save_for_task,
+                None,
+                gate,
+                |_, _, _| {},
+                |_| {},
+            )
+            .await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(server);
+            r
+        });
+
+        let conn = crate::net::connect_peer(&client, addr, TEST_ALPN, Duration::ZERO)
+            .await
+            .expect("应能连上");
+        send_on_conn(&conn, &a, &SendOptions::default(), |_, _| {})
+            .await
+            .expect("放行后第一个文件应发送成功");
+        send_on_conn(&conn, &b, &SendOptions::default(), |_, _| {})
+            .await
+            .expect("同连接第二个文件不应再被询问");
+        conn.close(0u32.into(), b"done");
+        drop(conn);
+
+        let got = server_task.await.unwrap().expect("接收会话应正常结束");
+        assert_eq!(got, 2, "应收到 2 个文件");
+        assert_eq!(gate_calls.load(Ordering::Relaxed), 1, "整条连接只应弹一次确认");
+        assert_eq!(std::fs::read(save.join("a.bin")).unwrap(), vec![1u8; 90_000]);
+        assert_eq!(std::fs::read(save.join("b.bin")).unwrap(), vec![2u8; 70_000]);
+    }
+
+    /// 拒绝后同一批发送应当中止：第二个文件不能再发出去。
+    #[tokio::test]
+    async fn reject_stops_batch_sender_side() {
+        let dir = scratch("reject-batch");
+        let a = dir.join("a.bin");
+        let b = dir.join("b.bin");
+        std::fs::write(&a, vec![3u8; 50_000]).unwrap();
+        std::fs::write(&b, vec![4u8; 50_000]).unwrap();
+
+        let (server, client) = endpoint_pair().await;
+        let addr = loopback_addr(&server);
+        let save = scratch("reject-batch-save");
+
+        let gate: Gate = Arc::new(|_: GateRequest| Box::pin(async { GateDecision::Reject }));
+        let save_for_task = save.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.accept().unwrap().await.unwrap();
+            let r = handle_session(&conn, &save_for_task, None, gate, |_, _, _| {}, |_| {}).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(server);
+            r
+        });
+
+        let conn = crate::net::connect_peer(&client, addr, TEST_ALPN, Duration::ZERO)
+            .await
+            .expect("应能连上");
+        let first = send_on_conn(&conn, &a, &SendOptions::default(), |_, _| {}).await;
+        assert!(first.is_err(), "第一个文件就应被拒绝");
+        // 拒绝后接收端已关流；无论如何第二个文件不能正常完成落盘。
+        let _ = send_on_conn(&conn, &b, &SendOptions::default(), |_, _| {}).await;
+        drop(conn);
+
+        let _ = server_task.await.unwrap();
+        let leftover: Vec<_> = std::fs::read_dir(&save)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !leftover.iter().any(|n| n == "a.bin" || n == "b.bin"),
+            "拒绝的文件不应被写入，实际残留：{leftover:?}"
+        );
+    }
+
+    /// 发送方昵称应编进元数据，确认请求里能看到。
+    #[tokio::test]
+    async fn gate_request_carries_sender_nickname() {
+        let dir = scratch("nick");
+        let src = dir.join("n.bin");
+        std::fs::write(&src, vec![5u8; 30_000]).unwrap();
+
+        let (server, client) = endpoint_pair().await;
+        let addr = loopback_addr(&server);
+        let save = scratch("nick-save");
+
+        let got_name = Arc::new(tokio::sync::Mutex::new(String::new()));
+        let got_for_gate = got_name.clone();
+        let gate: Gate = Arc::new(move |req: GateRequest| {
+            let got_for_gate = got_for_gate.clone();
+            Box::pin(async move {
+                *got_for_gate.lock().await = req.peer_name;
+                GateDecision::Allow
+            })
+        });
+
+        let save_for_task = save.clone();
+        let server_task = tokio::spawn(async move {
+            let incoming = server.accept().await.unwrap();
+            let conn = incoming.accept().unwrap().await.unwrap();
+            let r = handle_session(&conn, &save_for_task, None, gate, |_, _, _| {}, |_| {}).await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            drop(server);
+            r
+        });
+
+        let opts = SendOptions {
+            sender: Some("小明的台式机".into()),
+            ..Default::default()
+        };
+        send_file(&client, addr, TEST_ALPN, &src, &opts, |_, _| {})
+            .await
+            .expect("发送应成功");
+        server_task.await.unwrap().expect("接收应成功");
+        assert_eq!(*got_name.lock().await, "小明的台式机", "确认请求应携带发送方昵称");
     }
 
     /// 大文件真实走 4 条单向流，接收后逐字节一致。

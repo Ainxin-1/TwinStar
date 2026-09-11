@@ -183,6 +183,67 @@ listen("recv-progress", (e) => {
   statusDot.className = "dot dot-blue";
 });
 
+// ── 接收确认弹窗 ──
+const recvModal = $("recv-modal");
+const reqPeer = $("req-peer");
+const reqFile = $("req-file");
+const reqSize = $("req-size");
+const reqDir = $("req-dir");
+const reqRemember = $("req-remember");
+const btnRecvAllow = $("btn-recv-allow");
+const btnRecvReject = $("btn-recv-reject");
+let pendingReqPeer = null; // 当前弹窗对应的对端 id
+
+listen("recv-request", (e) => {
+  const r = e.payload;
+  pendingReqPeer = r.peer_id;
+  reqPeer.textContent = r.peer_name;
+  reqPeer.title = r.peer_id;
+  reqFile.textContent = r.file_name;
+  reqFile.title = r.file_name;
+  reqSize.textContent = fmtSize(r.file_size);
+  reqDir.textContent = r.save_dir;
+  reqRemember.checked = false;
+  recvModal.classList.remove("hidden");
+  recvStatus.textContent = "⚠️ 对方请求发送文件，等待确认…";
+  recvStatus.className = "recv-status active";
+});
+
+function closeRecvModal() {
+  recvModal.classList.add("hidden");
+  pendingReqPeer = null;
+  reqRemember.checked = false;
+}
+
+listen("recv-request-closed", (e) => {
+  if (!pendingReqPeer || e.payload === pendingReqPeer) closeRecvModal();
+  recvStatus.textContent = "等待对方连接…";
+  recvStatus.className = "recv-status";
+});
+
+btnRecvAllow.addEventListener("click", async () => {
+  if (!pendingReqPeer) return;
+  const peer = pendingReqPeer;
+  closeRecvModal();
+  try {
+    await invoke("respond_recv_request", { peerId: peer, allow: true, remember: reqRemember.checked });
+  } catch (err) {
+    addLog("确认回传失败：" + err);
+  }
+});
+
+btnRecvReject.addEventListener("click", async () => {
+  if (!pendingReqPeer) return;
+  const peer = pendingReqPeer;
+  closeRecvModal();
+  try {
+    await invoke("respond_recv_request", { peerId: peer, allow: false, remember: false });
+    addLog("已拒绝对方的传输请求");
+  } catch (err) {
+    addLog("确认回传失败：" + err);
+  }
+});
+
 listen("recv-done", (e) => {
   recvStatus.textContent = "等待对方连接…";
   recvStatus.className = "recv-status";

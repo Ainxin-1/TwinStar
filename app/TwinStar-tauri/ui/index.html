@@ -74,7 +74,7 @@
       <div class="card" data-page-node-id="6gWiHPV9nQabwQTLahIJTQ">
         <div class="card-row" data-page-node-id="jBzJaiZToCx3PE9bhj2m5r">
           <div class="card-title" data-page-node-id="UKOA1gswiWYbR92ISlycaB">接收文件</div>
-          <span class="pill pill-blue" data-page-node-id="GfwR1dF6h1PEYwN2kHRw47">自动接收</span>
+          <span class="pill pill-blue" data-page-node-id="GfwR1dF6h1PEYwN2kHRw47">信任设备自动接收</span>
         </div>
         <div class="save-row" data-page-node-id="3AtkDLwxeelXV0nTkNlTJN">
           <span id="save-dir" class="save-dir" data-page-node-id="IUvxhH2cNo1YSdWHgKNQu3">保存到 …</span>
@@ -164,8 +164,25 @@
       <span id="status-dot" class="dot dot-gray" data-page-node-id="5OxtQIKHArGyF5KPnsTMOL"></span>
       <span id="status-text" data-page-node-id="CwKN4loM5Ll3pVsH3hrXwk">正在建立网络…</span>
     </div>
-    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.9.1</span>
+    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.11.0</span>
   </footer>
+
+  <!-- 接收确认弹窗 -->
+  <div id="recv-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-title">⚠️ 收到传输请求</div>
+      <div class="req-line"><span class="req-k">设备</span><span id="req-peer">—</span></div>
+      <div class="req-line"><span class="req-k">文件</span><span id="req-file">—</span></div>
+      <div class="req-line"><span class="req-k">大小</span><span id="req-size">—</span></div>
+      <div class="req-line"><span class="req-k">保存到</span><span id="req-dir">—</span></div>
+      <label class="remember-row"><input type="checkbox" id="req-remember" />记住此设备（下次自动接收）</label>
+      <div class="btn-row">
+        <button id="btn-recv-reject" class="btn btn-ghost btn-lg">拒 绝</button>
+        <button id="btn-recv-allow" class="btn btn-primary btn-lg">接 收</button>
+      </div>
+      <div class="field-hint">不确定对方是谁就选「拒绝」——拒绝不会写入任何文件。</div>
+    </div>
+  </div>
 
   <script src="app.js"></script>
 </body>

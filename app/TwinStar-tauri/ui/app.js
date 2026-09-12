@@ -630,7 +630,7 @@ function renderFiles(list) {
 $("btn-open-folder").addEventListener("click", async () => {
   try {
     if (IS_ANDROID) {
-      addLog("📂 接收目录：" + currentSaveDir + "（文件管理器中进入 Android/data/com.ainxin.twinstar/files/TwinStar）");
+      await invoke("open_received_dir");
     } else {
       await invoke("open_folder");
     }

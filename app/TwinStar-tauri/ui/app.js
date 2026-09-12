@@ -524,8 +524,9 @@ btnCancel.addEventListener("click", async () => {
 
 // ── 接收目录 ──
 if (IS_ANDROID) {
-  // 安卓接收目录固定在应用私有存储，"更改"无意义，直接隐藏
+  // 安卓接收目录是应用专属目录（其它应用不可见）：无"更改"和"打开文件夹"的意义，隐藏
   $("btn-folder").classList.add("hidden");
+  $("btn-open-folder").classList.add("hidden");
 }
 $("btn-folder").addEventListener("click", async () => {
   const dir = await invoke("pick_folder");
@@ -533,6 +534,11 @@ $("btn-folder").addEventListener("click", async () => {
     currentSaveDir = dir;
     saveDirEl.textContent = "保存到 " + dir;
   }
+});
+
+invoke("get_save_dir").then((dir) => {
+  currentSaveDir = dir;
+  saveDirEl.textContent = "保存到 " + dir;
 });
 
 invoke("get_save_dir").then((dir) => {
@@ -620,6 +626,22 @@ function renderFiles(list) {
     });
     actions.appendChild(reveal);
     actions.appendChild(act);
+    if (IS_ANDROID) {
+      // 安卓：文件在应用专属目录，用户取走文件走系统分享
+      const share = document.createElement("button");
+      share.className = "row-action sub";
+      share.textContent = "分享";
+      share.title = "通过微信 / QQ 等应用分享此文件";
+      share.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        try {
+          await invoke("share_received_file", { name: f.name });
+        } catch (e) {
+          addLog("分享失败：" + e);
+        }
+      });
+      actions.appendChild(share);
+    }
     row.appendChild(main);
     row.appendChild(actions);
     row.addEventListener("click", () => openReceived(f.name));

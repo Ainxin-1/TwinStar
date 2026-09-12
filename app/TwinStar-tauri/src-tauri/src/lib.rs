@@ -151,28 +151,14 @@ fn default_save_dir() -> String {
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().display().to_string())
 }
 
-/// Android：接收目录用**公共下载区** Download/TwinStar（需"所有文件访问"权限）。
-/// 公共目录文件管理器天然可浏览、"打开文件夹"可直达；无权限时退回外部应用目录。
+/// Android：接收目录用应用专属外部目录
+/// （/storage/emulated/0/Android/data/<包名>/files/TwinStar）。
+/// 该目录只属于本应用：文件管理器看不见，"我的文件"列表里
+/// 只会出现本应用真正接收过的文件（用户需求：隔离非本应用文件）。
+/// 用户取文件走每条文件记录上的「分享」（FileProvider + 系统分享面板）。
 #[cfg(not(windows))]
 fn default_save_dir() -> String {
-    if has_public_storage_access() {
-        "/storage/emulated/0/Download/TwinStar".into()
-    } else {
-        "/storage/emulated/0/Android/data/com.ainxin.twinstar/files/TwinStar".into()
-    }
-}
-
-/// 探测能否直接写公共存储（等价于已授予"所有文件访问"）。
-#[cfg(target_os = "android")]
-fn has_public_storage_access() -> bool {
-    let probe = std::path::Path::new("/storage/emulated/0/Download/.twinstar_probe");
-    match std::fs::write(probe, b"t") {
-        Ok(()) => {
-            let _ = std::fs::remove_file(probe);
-            true
-        }
-        Err(_) => false,
-    }
+    "/storage/emulated/0/Android/data/com.ainxin.twinstar/files/TwinStar".into()
 }
 
 // ---------------- 网络层 ----------------
@@ -983,60 +969,106 @@ fn open_received_file(app: AppHandle, webview: tauri::Webview, name: String) -> 
     open_file(app, name)
 }
 
-/// 安卓：查询"所有文件访问"是否已授予（无权限时打开公共目录会被拒）。
+/// 安卓：把接收目录里的文件分享出去（FileProvider + 系统分享面板）。
+/// 接收目录是应用私有目录，别的应用看不见——用户取文件走系统分享，
+/// 与微信/QQ 的文件导出方式一致。
 #[cfg(target_os = "android")]
 #[tauri::command]
-fn check_all_files_access() -> bool {
-    has_public_storage_access()
-}
+fn share_received_file(
+    app: AppHandle,
+    webview: tauri::Webview,
+    name: String,
+) -> Result<(), String> {
+    let dir = save_dir().lock().unwrap().clone();
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("非法文件名".into());
+    }
+    let full = std::path::Path::new(&dir).join(&name);
+    if !full.is_file() {
+        return Err(format!("文件不存在：{name}"));
+    }
+    let path_str = full.display().to_string();
+    let app_for_cb = app.clone();
 
-/// 安卓：跳转系统"所有文件访问"授权页（用户打开开关后回到应用即可）。
-#[cfg(target_os = "android")]
-#[tauri::command]
-fn request_all_files_access(webview: tauri::Webview) -> Result<(), String> {
-    let app_for_cb = webview.app_handle().clone();
     webview
         .with_webview(move |platform| {
             let jh = platform.jni_handle();
             jh.exec(move |env, activity, _| {
                 let result: Result<(), String> = (|| {
-                    // 优先直达本应用的授权开关页
-                    let jpkg = env
-                        .new_string("package:com.ainxin.twinstar")
-                        .map_err(|e| format!("pkg: {e}"))?;
-                    let uri_cls = env
-                        .find_class("android/net/Uri")
-                        .map_err(|e| format!("find Uri: {e}"))?;
+                    let jpath = env
+                        .new_string(&path_str)
+                        .map_err(|e| format!("new_string: {e}"))?;
+                    let file_cls = env
+                        .find_class("java/io/File")
+                        .map_err(|e| format!("find File: {e}"))?;
+                    let jfile = env
+                        .new_object(
+                            &file_cls,
+                            "(Ljava/lang/String;)V",
+                            &[jni::objects::JValue::Object(&jpath)],
+                        )
+                        .map_err(|e| format!("new File: {e}"))?;
+                    let jauthority = env
+                        .new_string("com.ainxin.twinstar.fileprovider")
+                        .map_err(|e| format!("new_string: {e}"))?;
+                    let fp_cls = env
+                        .find_class("androidx/core/content/FileProvider")
+                        .map_err(|e| format!("find FileProvider: {e}"))?;
                     let juri = env
                         .call_static_method(
-                            &uri_cls,
-                            "parse",
-                            "(Ljava/lang/String;)Landroid/net/Uri;",
-                            &[jni::objects::JValue::Object(&jpkg)],
-                        )
-                        .map_err(|e| format!("parse: {e}"))?
-                        .l()
-                        .map_err(|e| format!("uri: {e}"))?;
-                    let action = env
-                        .new_string("android.intent.action.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION")
-                        .map_err(|e| format!("action: {e}"))?;
-                    let action_obj: jni::objects::JObject = action.into();
-                    let intent = env
-                        .new_object(
-                            "android/content/Intent",
-                            "(Ljava/lang/String;Landroid/net/Uri;)V",
+                            &fp_cls,
+                            "getUriForFile",
+                            "(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;",
                             &[
-                                jni::objects::JValue::Object(&action_obj),
-                                jni::objects::JValue::Object(&juri),
+                                jni::objects::JValue::Object(activity),
+                                jni::objects::JValue::Object(&jauthority),
+                                jni::objects::JValue::Object(&jfile),
                             ],
                         )
+                        .map_err(|e| format!("getUriForFile: {e}"))?
+                        .l()
+                        .map_err(|e| format!("uri: {e}"))?;
+                    let jmime = env
+                        .new_string(mime_for(&name))
+                        .map_err(|e| format!("new_string: {e}"))?;
+                    let intent = env
+                        .new_object("android/content/Intent", "()V", &[])
                         .map_err(|e| format!("new Intent: {e}"))?;
-                    // FLAG_ACTIVITY_NEW_TASK
+                    let action = env
+                        .new_string("android.intent.action.SEND")
+                        .map_err(|e| format!("action: {e}"))?;
+                    let action_obj: jni::objects::JObject = action.into();
+                    env.call_method(
+                        &intent,
+                        "setAction",
+                        "(Ljava/lang/String;)Landroid/content/Intent;",
+                        &[jni::objects::JValue::Object(&action_obj)],
+                    )
+                    .map_err(|e| format!("setAction: {e}"))?;
+                    env.call_method(
+                        &intent,
+                        "setType",
+                        "(Ljava/lang/String;)Landroid/content/Intent;",
+                        &[jni::objects::JValue::Object(&jmime)],
+                    )
+                    .map_err(|e| format!("setType: {e}"))?;
+                    // EXTRA_STREAM = "android.intent.extra.STREAM"
+                    let jextra_key = env
+                        .new_string("android.intent.extra.STREAM")
+                        .map_err(|e| format!("extra key: {e}"))?;
+                    env.call_method(
+                        &intent,
+                        "putExtra",
+                        "(Ljava/lang/String;Landroid/net/Uri;)Landroid/content/Intent;",
+                        &[jni::objects::JValue::Object(&jextra_key), jni::objects::JValue::Object(&juri)],
+                    )
+                    .map_err(|e| format!("putExtra: {e}"))?;
+                    // FLAG_GRANT_READ_URI_PERMISSION = 1
                     env.call_method(
                         &intent,
                         "addFlags",
                         "(I)Landroid/content/Intent;",
-                        &[jni::objects::JValue::Int(0x1000_0000)],
+                        &[jni::objects::JValue::Int(1)],
                     )
                     .map_err(|e| format!("addFlags: {e}"))?;
                     env.call_method(
@@ -1048,41 +1080,10 @@ fn request_all_files_access(webview: tauri::Webview) -> Result<(), String> {
                     .map_err(|e| format!("startActivity: {e}"))?;
                     Ok(())
                 })();
+
                 if let Err(e) = result {
-                    // 直达页失败（部分 ROM 不支持）→ 退到通用"所有文件"页
-                    env.exception_clear();
-                    let retry: Result<(), String> = (|| {
-                        let action = env
-                            .new_string("android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION")
-                            .map_err(|e| format!("action: {e}"))?;
-                        let action_obj: jni::objects::JObject = action.into();
-                        let intent = env
-                            .new_object(
-                                "android/content/Intent",
-                                "(Ljava/lang/String;)V",
-                                &[jni::objects::JValue::Object(&action_obj)],
-                            )
-                            .map_err(|e| format!("new Intent: {e}"))?;
-                        env.call_method(
-                            &intent,
-                            "addFlags",
-                            "(I)Landroid/content/Intent;",
-                            &[jni::objects::JValue::Int(0x1000_0000)],
-                        )
-                        .map_err(|e| format!("addFlags: {e}"))?;
-                        env.call_method(
-                            activity,
-                            "startActivity",
-                            "(Landroid/content/Intent;)V",
-                            &[jni::objects::JValue::Object(&intent)],
-                        )
-                        .map_err(|e| format!("startActivity: {e}"))?;
-                        Ok(())
-                    })();
-                    if let Err(e2) = retry {
-                        env.exception_clear();
-                        let _ = app_for_cb.emit("log", format!("❌ 无法打开授权页：{e} / {e2}"));
-                    }
+                    let _ = env.exception_clear();
+                    let _ = app_for_cb.emit("log", format!("❌ 分享失败：{e}"));
                 }
             });
         })
@@ -1090,17 +1091,11 @@ fn request_all_files_access(webview: tauri::Webview) -> Result<(), String> {
     Ok(())
 }
 
-/// 桌面版占位：桌面不需要该权限。
+/// 桌面版占位：桌面直接用资源管理器，无需分享面板。
 #[cfg(not(target_os = "android"))]
 #[tauri::command]
-fn check_all_files_access() -> bool {
-    true
-}
-
-#[cfg(not(target_os = "android"))]
-#[tauri::command]
-fn request_all_files_access() -> Result<(), String> {
-    Ok(())
+fn share_received_file(_name: String) -> Result<(), String> {
+    Err("桌面版请在资源管理器中操作".into())
 }
 
 /// 按扩展名粗略猜 MIME（打开文件用，猜不出给通用类型）。
@@ -1126,115 +1121,16 @@ fn mime_for(name: &str) -> String {
     }
     .to_string()
 }
-
-/// 安卓：在系统文件管理器中打开接收目录。
-/// 用 DocumentsContract 构造目录 URI（externalstorage 文档提供者），先后以
-/// 标准/传统目录 MIME 唤起 ACTION_VIEW；都失败则回退为日志提示路径。
+/// 安卓：接收目录是应用专属目录，其它应用（含文件管理器）无法进入，
+/// "打开文件夹"没有可打开的目标——提示用户用每条文件的「打开/分享」取文件。
+/// （早期版本曾尝试 DocumentsContract 目录 URI，Android 11+ 上被系统拦下，已废弃。）
 #[cfg(target_os = "android")]
 #[tauri::command]
-fn open_received_dir(app: AppHandle, webview: tauri::Webview) -> Result<(), String> {
-    let dir = save_dir().lock().unwrap().clone();
-    let app_for_cb = app.clone();
-
-    // 无"所有文件访问"权限时公共目录不可写、Android/data 目录文件管理器又进不去：
-    // 此时直接拉起系统授权开关页，并提示用户打开后重试。
-    if !has_public_storage_access() {
-        let _ = request_all_files_access(webview.clone());
-        return Err(
-            "需要「所有文件访问」权限才能把接收文件放进公共下载目录：已为你打开系统授权页，请打开开关后返回重试。".into(),
-        );
-    }
-
-    webview
-        .with_webview(move |platform| {
-            let jh = platform.jni_handle();
-            jh.exec(move |env, activity, _| {
-                // 去掉 "/storage/emulated/0" 前缀，转成文档提供者的 docId 形式
-                let doc_path = dir
-                    .trim_start_matches("/storage/emulated/0")
-                    .trim_start_matches('/')
-                    .to_string();
-                let doc_id = format!("primary:{doc_path}");
-
-                let mut last_err = String::new();
-                let mut opened = false;
-                for (mime, label) in [
-                    ("vnd.android.document/directory", "系统文档"),
-                    ("resource/directory", "文件管理"),
-                ] {
-                    let attempt: Result<(), String> = (|| {
-                        let jauthority = env
-                            .new_string("com.android.externalstorage.documents")
-                            .map_err(|e| format!("authority: {e}"))?;
-                        let jdoc = env.new_string(&doc_id).map_err(|e| format!("doc: {e}"))?;
-                        let dc_cls = env
-                            .find_class("android/provider/DocumentsContract")
-                            .map_err(|e| format!("find DocumentsContract: {e}"))?;
-                        let juri = env
-                            .call_static_method(
-                                &dc_cls,
-                                "buildDocumentUri",
-                                "(Ljava/lang/String;Ljava/lang/String;)Landroid/net/Uri;",
-                                &[
-                                    jni::objects::JValue::Object(&jauthority),
-                                    jni::objects::JValue::Object(&jdoc),
-                                ],
-                            )
-                            .map_err(|e| format!("buildDocumentUri: {e}"))?
-                            .l()
-                            .map_err(|e| format!("uri: {e}"))?;
-                        let jmime = env.new_string(mime).map_err(|e| format!("mime: {e}"))?;
-                        let intent = env
-                            .new_object("android/content/Intent", "()V", &[])
-                            .map_err(|e| format!("new Intent: {e}"))?;
-                        env.call_method(
-                            &intent,
-                            "setDataAndType",
-                            "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;",
-                            &[jni::objects::JValue::Object(&juri), jni::objects::JValue::Object(&jmime)],
-                        )
-                        .map_err(|e| format!("setDataAndType: {e}"))?;
-                        // FLAG_ACTIVITY_NEW_TASK = 0x10000000
-                        env.call_method(
-                            &intent,
-                            "addFlags",
-                            "(I)Landroid/content/Intent;",
-                            &[jni::objects::JValue::Int(0x1000_0000)],
-                        )
-                        .map_err(|e| format!("addFlags: {e}"))?;
-                        env.call_method(
-                            activity,
-                            "startActivity",
-                            "(Landroid/content/Intent;)V",
-                            &[jni::objects::JValue::Object(&intent)],
-                        )
-                        .map_err(|e| format!("startActivity({label}): {e}"))?;
-                        Ok(())
-                    })();
-                    match attempt {
-                        Ok(()) => {
-                            opened = true;
-                            break;
-                        }
-                        Err(e) => {
-                            env.exception_clear();
-                            last_err = e;
-                        }
-                    }
-                }
-
-                if !opened {
-                    let _ = app_for_cb.emit(
-                        "log",
-                        format!(
-                            "📂 未能唤起文件管理器（{last_err}）。接收目录：{dir}——可在系统「文件管理」的 Android/data/com.ainxin.twinstar/files/TwinStar 找到。"
-                        ),
-                    );
-                }
-            });
-        })
-        .map_err(|e| format!("with_webview: {e}"))?;
-    Ok(())
+fn open_received_dir() -> Result<(), String> {
+    Err(format!(
+        "接收文件保存在应用专属目录（{}），系统限制其它应用进入该目录；请用每条文件右侧的「打开」查看，或「分享」传给其它应用。",
+        save_dir().lock().unwrap().clone()
+    ))
 }
 
 /// 桌面版同入口：转发到 open_folder。
@@ -1553,72 +1449,69 @@ pub fn run() {
     let _ = SAVE_DIR.set(Arc::new(Mutex::new(initial_save_dir)));
     let _ = NICKNAME.set(Arc::new(Mutex::new(initial_cfg.nickname)));
 
-    // 安卓迁移：老版本把配置放进了接收目录、接收目录又在内部存储/应用目录里，
-    // 文件管理器拿不到。目标布局：
+    // 安卓迁移：老版本把配置放进了接收目录、接收目录又在内部存储里，
+    // 文件管理器拿不到。目标布局（应用私有，杜绝混入非本应用文件）：
     //   配置 → 内部 files/config/（settings.json + device_identity.json）
-    //   接收文件 → 公共 Download/TwinStar（需"所有文件访问"，未授权时暂留原处，
-    //   授权后下次启动自动补迁）。
+    //   接收文件 → 外部应用专属目录 Android/data/<包名>/files/TwinStar
+    // 用户取文件走每条文件的「打开 / 分享」（FileProvider + 系统面板）。
     #[cfg(target_os = "android")]
     {
-        let granted = has_public_storage_access();
-        let public_dir = "/storage/emulated/0/Download/TwinStar".to_string();
-        let mut stale_dirs: Vec<std::path::PathBuf> = vec![
-            // v0.12.1-：内部接收目录
+        let save_dir_new = default_save_dir();
+        let _ = std::fs::create_dir_all(&save_dir_new);
+        let new_cfg = crate::core::path::android_config_dir();
+        let _ = std::fs::create_dir_all(&new_cfg);
+        // 历史接收目录（内部 files/TwinStar + 曾短暂使用的公共 Download/TwinStar）
+        let stale_dirs = [
             crate::core::path::android_app_files_dir().join("TwinStar"),
-            // v0.12.1+（权限前）：外部应用目录
-            std::path::PathBuf::from(
-                "/storage/emulated/0/Android/data/com.ainxin.twinstar/files/TwinStar",
-            ),
+            std::path::PathBuf::from("/storage/emulated/0/Download/TwinStar"),
         ];
-        if granted {
-            let _ = std::fs::create_dir_all(&public_dir);
-            let new_cfg = crate::core::path::android_config_dir();
-            let _ = std::fs::create_dir_all(&new_cfg);
-            for old_dir in &stale_dirs {
-                if !old_dir.is_dir() {
-                    continue;
-                }
-                if let Ok(rd) = std::fs::read_dir(old_dir) {
-                    for entry in rd.flatten() {
-                        let name = entry.file_name().to_string_lossy().to_string();
-                        let dest = match name.as_str() {
-                            "settings.json" | "device_identity.json" => new_cfg.join(&name),
-                            _ => std::path::Path::new(&public_dir).join(&name),
-                        };
-                        if !dest.exists() {
-                            let _ = std::fs::rename(entry.path(), &dest);
-                        }
+        for old_dir in &stale_dirs {
+            if !old_dir.is_dir() || *old_dir == std::path::PathBuf::from(&save_dir_new) {
+                continue;
+            }
+            if let Ok(rd) = std::fs::read_dir(old_dir) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let dest = match name.as_str() {
+                        "settings.json" | "device_identity.json" => new_cfg.join(&name),
+                        _ => std::path::Path::new(&save_dir_new).join(&name),
+                    };
+                    if !dest.exists() {
+                        let _ = std::fs::rename(entry.path(), &dest);
                     }
                 }
-                let _ = std::fs::remove_dir(old_dir); // 空了才删得掉，无妨
             }
-            stale_dirs.clear();
+            let _ = std::fs::remove_dir(old_dir); // 空了才删得掉，无妨
         }
 
-        // download_dir 指向旧位置（内部目录 / Android/data）的一律纠正
+        // download_dir 指向历史位置的一律纠正回应用专属目录
         let mut cfg = Config::load();
         let stale = cfg
             .download_dir
             .as_deref()
             .map(|d| {
                 d.starts_with("/data/data/")
-                    || d.starts_with("/storage/emulated/0/Android/data/")
+                    || (d.starts_with("/storage/emulated/0/")
+                        && !d.ends_with(&save_dir_new))
             })
             .unwrap_or(false);
-        if stale || (granted && cfg.download_dir.is_none()) {
-            cfg.download_dir = Some(public_dir.clone());
+        if stale {
+            cfg.download_dir = Some(save_dir_new.clone());
             let _ = cfg.save();
-        }
-        if stale && SAVE_DIR.get().is_some() {
             if let Some(d) = SAVE_DIR.get() {
-                *d.lock().unwrap() = if granted {
-                    public_dir
-                } else {
-                    default_save_dir()
-                };
+                *d.lock().unwrap() = save_dir_new.clone();
             }
         }
-        let _ = &mut stale_dirs;
+
+        // 首次使用：放一个说明文件，让"我的文件"页不至于全空，
+        // 也方便用户立刻试「打开 / 分享」。
+        let welcome = std::path::Path::new(&save_dir_new).join("欢迎使用TwinStar.txt");
+        if !welcome.exists() && std::fs::read_dir(&save_dir_new).map(|mut d| d.next().is_none()).unwrap_or(true) {
+            let _ = std::fs::write(
+                &welcome,
+                "这是 TwinStar 的接收目录。\r\n\r\n· 别人传给你的文件会保存在这里\r\n· 在「我的文件」里点「打开」可直接查看，点「分享」可发给微信/QQ 等\r\n· 本目录仅本应用可访问，其它应用看不到，请放心\r\n",
+            );
+        }
     }
 
     #[allow(unused_mut)]
@@ -1721,9 +1614,8 @@ pub fn run() {
             list_files,
             open_file,
             open_received_file,
+            share_received_file,
             open_received_dir,
-            check_all_files_access,
-            request_all_files_access,
             open_folder,
             reveal_file
         ])

@@ -1,0 +1,78 @@
+════════════════════════════════════════════════════
+  TwinStar 未完成事项清单
+  生成时间：2026-09-13 00:10
+  当前版本：v0.12.1（桌面 exe / 安卓 arm64 APK 均已产出并装机）
+════════════════════════════════════════════════════
+
+【一、安卓端（优先级高）】
+
+1. 手机端「发送文件」打通 ★最关键缺口★
+   现状：系统文件选择器能弹出，但选完后结果回不到应用
+   （wry 的安卓 WebView 不支持 <input type=file>；SAF 回调在
+   ColorOS 上丢失；且 content:// URI 无法被 Rust 直接读取）。
+   方案：写一个 Kotlin 小桥（或在 MainActivity 加方法），用
+   ContentResolver.openInputStream 把选中的 content:// 复制到
+   应用缓存目录，再走现有传输层。
+   预计工作量：1~2 轮构建迭代。
+   打通后：手机↔电脑双向互传完整闭环。
+
+2. 「我的文件」列表验证
+   现状：私有目录新架构已装机，但列表为空且预期的
+   「欢迎使用TwinStar.txt」没出现——迁移/写入路径有一处
+   未按预期执行，需加调试日志排查一轮（约 10 分钟构建）。
+
+3. 真机端到端收发验收（= 任务书阶段 5 的局域网部分）
+   流程：电脑发文件 → 手机弹确认框 → 点接收 → 我的文件
+   出现该文件 → 点「打开」能看 → 点「分享」能发微信/QQ。
+   需要用户配合在手机上点一次「接收」。
+
+4. x86_64 模拟器版 APK 未更新（还是 v0.12.0）
+   补一次：cargo tauri android build --apk --target x86_64
+   并拷贝到 release/。
+
+5. Android Studio 构建路线验证
+   Studio 已安装（winget）。工程位置：
+   E:\TwinStar\app\TwinStar-tauri\src-tauri\gen\android
+   未用 Studio 实际走一遍 Gradle 同步 + 构建验证。
+
+【二、1.0 发布待办（优先级中）】
+
+6. GitHub Release 发布
+   - 上传产物：TwinStar-v0.12.1-win-x64.exe + arm64 APK
+     （gh CLI 未装，走 API 上传接口或网页上传）
+   - 写发布说明（安卓首个版本、接收确认、私有目录说明）
+   - 更新 README 顶部下载链接（当前还指向 v0.10.1）
+
+7. 跨网真机验证（阶段 5 核心项）
+   - 已验证：同一 WiFi 下的局域网发现 + 可直连标记
+   - 未验证：跨运营商/跨网络打洞、中继兜底、连接码跨网连接
+   - 做法：手机关 WiFi 用 5G，电脑走家宽，互发文件实测
+
+【三、代码清理（优先级低）】
+
+8. 安卓 target 3 个 unused Result 编译警告（JNI 调用处补 let _ =）
+9. demo/ 目录测试截图清理（phone_*.png 已作证据入库，可精简）
+10. docs/ROADMAP-1.0.md 补记安卓完成状态
+
+【已完成（无需再做）】
+
+✓ 桌面专用接收目录 Downloads\TwinStar（不再混入无关文件）
+✓ 安卓接收目录=应用私有目录（列表只含本应用收的文件）
+✓ 禁捏合缩放、状态栏留白、启动器图标、标签折行
+✓ 剪贴板（复制/复制带地址真机可用）
+✓ 安卓连接码跨重启稳定（身份持久化修复）
+✓ 网络就绪竞态修复（不再卡"初始化中"）
+✓ 横屏支持（系统自动旋转开启时跟随旋转）
+✓ SAF 系统选择器能弹出（卡点在读取，见第 1 条）
+✓ 每条文件「打开」（FileProvider+Intent）与「分享」按钮
+✓ 配置/身份与接收目录彻底分离 + 旧目录自动迁移
+✓ 桌面 38 项测试全绿、0 警告；全部代码已推送 GitHub
+════════════════════════════════════════════════════
+构建命令速查（安卓 aarch64）：
+  set JAVA_HOME=C:\Program Files\Microsoft\jdk-17.0.20.101-hotspot
+  set ANDROID_HOME=E:\AndroidEnv\Sdk
+  set NDK_HOME=E:\AndroidEnv\Sdk\ndk\27.0.12077973
+  cd /d E:\TwinStar\app\TwinStar-tauri
+  cargo tauri android build --apk --target aarch64
+  adb install -r src-tauri\gen\android\app\build\outputs\apk\universal\release\app-universal-release.apk
+════════════════════════════════════════════════════

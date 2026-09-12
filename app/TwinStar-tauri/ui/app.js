@@ -44,6 +44,18 @@ let sending = false;
 let logLines = [];
 let netReady = false;
 let myId = null;
+let currentSaveDir = "";
+
+// ── 平台 ──
+// 安卓上：WebView 剪贴板 API 不可靠（走原生命令）、无拖放（用系统文件输入）、
+// explorer/资源管理器定位不可用（走 opener Intent）。
+const IS_ANDROID = /Android/i.test(navigator.userAgent);
+if (IS_ANDROID) document.body.classList.add("android");
+
+// 跨平台复制：统一走原生命令（安卓 WebView 的 navigator.clipboard 会静默失败）。
+async function copyText(text) {
+  await invoke("copy_to_clipboard", { text });
+}
 
 // ── 小工具 ──
 function fullName(p) {
@@ -124,16 +136,27 @@ document.querySelectorAll(".tab").forEach((tab) => {
 });
 
 // ── 网络就绪 ──
-listen("net-ready", (e) => {
+// 启动时主动查一次（安卓 WebView 加载慢于网络线程，net-ready 事件可能已错过），
+// 之后的事件监听做幂等保护，两边谁先到都只生效一次。
+function onNetReady(id) {
+  if (netReady) return;
   netReady = true;
-  myId = e.payload;
+  myId = id;
   myIdEl.textContent = myId.slice(0, 8) + " … " + myId.slice(-8);
   myIdEl.title = myId + "\n（点击复制）";
   netPill.textContent = "● 网络就绪";
   netPill.className = "pill pill-green";
   idle();
   setSendEnabled();
-});
+}
+
+listen("net-ready", (e) => onNetReady(e.payload));
+
+invoke("get_my_id")
+  .then((id) => {
+    if (id) onNetReady(id);
+  })
+  .catch((e) => addLog("查询网络状态失败：" + e));
 
 // ── 通路：直连 / 中继 ──
 listen("conn-info", (e) => {
@@ -330,12 +353,16 @@ $("btn-diag").addEventListener("click", async () => {
 // ── 复制连接码 ──
 btnCopy.addEventListener("click", async () => {
   if (!myId) return;
-  await navigator.clipboard.writeText(myId);
-  btnCopy.textContent = "已复制";
+  try {
+    await copyText(myId);
+    btnCopy.textContent = "已复制";
+  } catch (e) {
+    addLog("复制失败：" + e);
+  }
   setTimeout(() => (btnCopy.textContent = "复制"), 1200);
 });
 myIdEl.addEventListener("click", async () => {
-  if (myId) await navigator.clipboard.writeText(myId);
+  if (myId) await copyText(myId);
 });
 
 // 「带地址」的码：把本机可直连的地址一起给对方，跳过网络发现。
@@ -344,7 +371,7 @@ btnCopyAddr.addEventListener("click", async () => {
   if (!myId) return;
   try {
     const code = await invoke("my_addr_code");
-    await navigator.clipboard.writeText(code);
+    await copyText(code);
     btnCopyAddr.textContent = "已复制";
     addLog("已复制带地址的连接码（对方粘贴后可跳过地址发现）");
   } catch (e) {
@@ -370,20 +397,32 @@ async function choose(paths) {
   }
 }
 
-dropzone.addEventListener("click", async () => {
-  const paths = await invoke("pick_files");
-  await choose(paths);
-});
+if (IS_ANDROID) {
+  // 安卓：rfd 不可用，pick_files 走 SAF 系统选择器（Rust 侧实现）；
+  // 整文件夹选择暂不支持，隐藏入口。
+  $("btn-pick-folder").classList.add("hidden");
+  dropzone.addEventListener("click", async () => {
+    await choose(await invoke("pick_files"));
+  });
+  $("btn-pick-files").addEventListener("click", async () => {
+    await choose(await invoke("pick_files"));
+  });
+} else {
+  dropzone.addEventListener("click", async () => {
+    const paths = await invoke("pick_files");
+    await choose(paths);
+  });
 
-$("btn-pick-files").addEventListener("click", async () => {
-  const paths = await invoke("pick_files");
-  await choose(paths);
-});
+  $("btn-pick-files").addEventListener("click", async () => {
+    const paths = await invoke("pick_files");
+    await choose(paths);
+  });
 
-$("btn-pick-folder").addEventListener("click", async () => {
-  const folder = await invoke("pick_send_folder");
-  if (folder) await choose([folder]);
-});
+  $("btn-pick-folder").addEventListener("click", async () => {
+    const folder = await invoke("pick_send_folder");
+    if (folder) await choose([folder]);
+  });
+}
 
 $("btn-clear-files").addEventListener("click", () => {
   selectedFiles = [];
@@ -484,12 +523,20 @@ btnCancel.addEventListener("click", async () => {
 });
 
 // ── 接收目录 ──
+if (IS_ANDROID) {
+  // 安卓接收目录固定在应用私有存储，"更改"无意义，直接隐藏
+  $("btn-folder").classList.add("hidden");
+}
 $("btn-folder").addEventListener("click", async () => {
   const dir = await invoke("pick_folder");
-  if (dir) saveDirEl.textContent = "保存到 " + dir;
+  if (dir) {
+    currentSaveDir = dir;
+    saveDirEl.textContent = "保存到 " + dir;
+  }
 });
 
 invoke("get_save_dir").then((dir) => {
+  currentSaveDir = dir;
   saveDirEl.textContent = "保存到 " + dir;
 });
 
@@ -517,6 +564,21 @@ function renderFiles(list) {
     return;
   }
   fileEmpty.classList.add("hidden");
+
+  // 安卓：explorer 定位不可用，"位置"改为在文件管理器里打开接收目录；
+  // "打开"走 opener Intent（FileProvider）。
+  async function openReceived(name) {
+    try {
+      if (IS_ANDROID) {
+        await invoke("open_path", { path: currentSaveDir + "/" + name });
+      } else {
+        await invoke("open_file", { name });
+      }
+    } catch (e) {
+      addLog("打开失败：" + e);
+    }
+  }
+
   for (const f of list) {
     const row = document.createElement("div");
     row.className = "list-row";
@@ -536,11 +598,15 @@ function renderFiles(list) {
     const reveal = document.createElement("button");
     reveal.className = "row-action sub";
     reveal.textContent = "位置";
-    reveal.title = "在资源管理器中显示此文件";
+    reveal.title = IS_ANDROID ? "在文件管理器中打开接收目录" : "在资源管理器中显示此文件";
     reveal.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       try {
-        await invoke("reveal_file", { name: f.name });
+        if (IS_ANDROID) {
+          await invoke("open_path", { path: currentSaveDir });
+        } else {
+          await invoke("reveal_file", { name: f.name });
+        }
       } catch (e) {
         addLog("打开位置失败：" + e);
       }
@@ -548,32 +614,26 @@ function renderFiles(list) {
     const act = document.createElement("button");
     act.className = "row-action";
     act.textContent = "打开";
-    act.addEventListener("click", async (ev) => {
+    act.addEventListener("click", (ev) => {
       ev.stopPropagation();
-      try {
-        await invoke("open_file", { name: f.name });
-      } catch (e) {
-        addLog("打开失败：" + e);
-      }
+      openReceived(f.name);
     });
     actions.appendChild(reveal);
     actions.appendChild(act);
     row.appendChild(main);
     row.appendChild(actions);
-    row.addEventListener("click", async () => {
-      try {
-        await invoke("open_file", { name: f.name });
-      } catch (e) {
-        addLog("打开失败：" + e);
-      }
-    });
+    row.addEventListener("click", () => openReceived(f.name));
     fileList.appendChild(row);
   }
 }
 
 $("btn-open-folder").addEventListener("click", async () => {
   try {
-    await invoke("open_folder");
+    if (IS_ANDROID) {
+      await invoke("open_path", { path: currentSaveDir });
+    } else {
+      await invoke("open_folder");
+    }
   } catch (e) {
     addLog("打开文件夹失败：" + e);
   }
@@ -643,6 +703,10 @@ $("btn-clear").addEventListener("click", () => {
 });
 
 $("btn-export-log").addEventListener("click", async () => {
+  if (IS_ANDROID) {
+    addLog("安卓版日志导出即将支持；当前可用 adb logcat 查看原生日志");
+    return;
+  }
   if (!logLines.length) {
     addLog("没有日志可导出");
     return;

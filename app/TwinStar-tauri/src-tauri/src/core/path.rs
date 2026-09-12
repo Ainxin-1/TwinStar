@@ -5,6 +5,12 @@
 
 use std::path::{Path, PathBuf};
 
+/// 安卓上 `dirs` 系列全部返回 None（无 XDG 概念），应用私有目录按包名确定性推导。
+/// config（settings.json）与 identity（device_identity.json）都落在它下面。
+pub fn android_app_files_dir() -> PathBuf {
+    PathBuf::from("/data/data/com.ainxin.twinstar/files")
+}
+
 /// 相对路径总长度上限（4 KiB）。
 pub const MAX_RELATIVE_PATH_LENGTH: usize = 4096;
 /// 单个路径组件（文件/目录名）长度上限。

@@ -144,15 +144,20 @@ fn cancel_flag() -> Arc<AtomicBool> {
 
 #[cfg(windows)]
 fn default_save_dir() -> String {
+    // 专用子目录：不再把整个 Downloads 当接收区（用户反馈：下载目录的
+    // 无关文件全被当成"已接收文件"列出）。
     std::env::var("USERPROFILE")
-        .map(|h| format!("{h}\\Downloads"))
+        .map(|h| format!("{h}\\Downloads\\TwinStar"))
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().display().to_string())
 }
 
 /// Android：没有 Downloads 概念，落在应用私有目录下的 TwinStar 文件夹。
 #[cfg(not(windows))]
 fn default_save_dir() -> String {
-    "/data/data/com.ainxin.twinstar/files/TwinStar".into()
+    crate::core::path::android_app_files_dir()
+        .join("TwinStar")
+        .display()
+        .to_string()
 }
 
 // ---------------- 网络层 ----------------
@@ -672,7 +677,8 @@ fn pick_file() -> Option<String> {
         .map(|p| p.display().to_string())
 }
 
-/// 安卓没有全局文件选择器可走 rfd，接 tauri-plugin-dialog（系统文件选择器）。
+/// 安卓：走 tauri-plugin-dialog 的 SAF 系统选择器。选到的多是 content:// URI，
+/// 能映射成本地路径的直接用；映射不了的给出明确提示（不静默失败）。
 #[cfg(mobile)]
 #[tauri::command]
 fn pick_files(app: AppHandle) -> Result<Option<Vec<String>>, String> {
@@ -687,14 +693,12 @@ fn pick_files(app: AppHandle) -> Result<Option<Vec<String>>, String> {
     };
     let mut out = Vec::new();
     for f in files {
-        // 安卓返回的多是 content:// URI：目前无法直接映射成本地路径供传输层读取，
-        // 给出明确的提示而不是静默失败。
         match f.into_path() {
             Ok(p) => out.push(p.display().to_string()),
-            Err(_) => {
-                return Err(
-                    "安卓版暂不支持读取该位置的文件（系统存储限制）。请先用系统文件管理器把文件复制到本应用目录，或改用电脑端发送。".into(),
-                )
+            Err(e) => {
+                return Err(format!(
+                    "安卓暂不支持直接读取该位置的文件（{e}）。请先用系统文件管理器把它复制到「我的文件」的接收目录，或改用电脑端发送。"
+                ))
             }
         }
     }
@@ -838,10 +842,67 @@ fn get_save_dir() -> String {
     save_dir().lock().unwrap().clone()
 }
 
+/// 跨平台复制文本到剪贴板。安卓 WebView 的 navigator.clipboard 不可靠，
+/// 统一走原生命令（桌面 WebView2 同样适用）。
+#[tauri::command]
+fn copy_to_clipboard(app: AppHandle, text: String) -> Result<(), String> {
+    use tauri_plugin_clipboard_manager::ClipboardExt;
+    app.clipboard().write_text(text).map_err(|e| e.to_string())
+}
+
+/// 跨平台打开文件 / 文件夹：桌面走系统默认程序，安卓走 Intent + FileProvider。
+#[tauri::command]
+fn open_path(app: AppHandle, path: String) -> Result<(), String> {
+    use tauri_plugin_opener::OpenerExt;
+    app.opener()
+        .open_path(path, None::<&str>)
+        .map_err(|e| e.to_string())
+}
+
+/// 把前端拾取到的文件字节落进应用缓存目录，返回可供传输层读取的路径。
+/// 安卓 SAF 选择器给的是 content:// URI，Rust 无法直接读，前端用
+/// `<input type=file>` 拿到字节后经本命令转存。
+#[tauri::command]
+fn save_picked_file(app: AppHandle, name: String, bytes: Vec<u8>) -> Result<String, String> {
+    use tauri::Manager;
+    let dir = app
+        .path()
+        .app_cache_dir()
+        .map_err(|e| e.to_string())?
+        .join("picked");
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // 只保留文件名里的安全字符，防止路径穿越
+    let safe: String = name
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | ' ' | '(' | ')') {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let path = dir.join(format!("{stamp}-{safe}"));
+    std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+    Ok(path.display().to_string())
+}
+
 /// 当前昵称（前端昵称编辑框的初始值）。
 #[tauri::command]
 fn get_nickname() -> String {
     nickname()
+}
+
+/// 网络是否已就绪 + 本机连接码。前端启动时主动查一次：
+/// 安卓上 WebView 加载比网络线程慢，`net-ready` 事件可能在监听器
+/// 注册前就已发出，纯靠事件会把 UI 永远卡在"初始化中"。
+#[tauri::command]
+fn get_my_id() -> Option<String> {
+    ENDPOINT.get().map(|e| e.id().to_string())
 }
 
 /// 改昵称：校验后写内存源 + 持久化。广播与发送元数据下一个周期即用新名。
@@ -1102,6 +1163,8 @@ pub fn run() {
         .download_dir
         .filter(|d| std::path::Path::new(d).is_dir())
         .unwrap_or_else(default_save_dir);
+    // 专用接收目录不存在就建（首次启动 / 新装机器）。
+    let _ = std::fs::create_dir_all(&initial_save_dir);
     let _ = SAVE_DIR.set(Arc::new(Mutex::new(initial_save_dir)));
     let _ = NICKNAME.set(Arc::new(Mutex::new(initial_cfg.nickname)));
 
@@ -1121,6 +1184,9 @@ pub fn run() {
     }
     // 系统文件/目录选择对话框：桌面走 rfd，安卓走本插件（系统 SAF 选择器）。
     builder = builder.plugin(tauri_plugin_dialog::init());
+    // 剪贴板 + 打开文件/文件夹（安卓 Intent + FileProvider）。
+    builder = builder.plugin(tauri_plugin_clipboard_manager::init());
+    builder = builder.plugin(tauri_plugin_opener::init());
     builder
         .setup(|app| {
             let handle = app.handle().clone();
@@ -1190,6 +1256,10 @@ pub fn run() {
             respond_recv_request,
             my_addr_code,
             get_save_dir,
+            copy_to_clipboard,
+            open_path,
+            save_picked_file,
+            get_my_id,
             get_nickname,
             set_nickname,
             get_onboarding,

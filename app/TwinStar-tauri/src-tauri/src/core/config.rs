@@ -49,10 +49,8 @@ pub fn validate_nickname(raw: &str) -> Result<String, String> {
 
 impl Config {
     fn file_path() -> Option<PathBuf> {
-        // Android 上 dirs 系列全部返回 None（无 XDG 概念），退到应用私有目录——
-        // 该路径由包名确定性推导，属于应用可写存储。
-        let base = dirs::config_dir()
-            .or_else(|| Some(PathBuf::from("/data/data/com.ainxin.twinstar/files")))?;
+        // Android 上 dirs 系列全部返回 None，退到应用私有目录（同 identity）。
+        let base = dirs::config_dir().unwrap_or_else(crate::core::path::android_app_files_dir);
         Some(base.join("TwinStar").join("settings.json"))
     }
 

@@ -2,7 +2,7 @@
 <html lang="zh-CN" data-page-node-id="BVFpCn7b9ZGe1QkFDWqWVi">
 <head data-page-node-id="5foKUZt9yyYe2azH0UVhVG">
   <meta charset="UTF-8" data-page-node-id="ZC5oGWsyH0N4IcXfr9mGsl" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="3rAnS1ia5XruD8tAHjZWni" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" data-page-node-id="3rAnS1ia5XruD8tAHjZWni" />
   <title>TwinStar — 零成本互传</title>
   <link rel="stylesheet" href="style.css" data-page-node-id="FA9ijctkBvh87vVZynUeOt" />
 </head>
@@ -171,7 +171,7 @@
       <span id="status-dot" class="dot dot-gray" data-page-node-id="5OxtQIKHArGyF5KPnsTMOL"></span>
       <span id="status-text" data-page-node-id="CwKN4loM5Ll3pVsH3hrXwk">正在建立网络…</span>
     </div>
-    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.12.0</span>
+    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.12.1</span>
   </footer>
 
   <!-- 接收确认弹窗 -->
@@ -211,5 +211,7 @@
   </div>
 
   <script src="app.js"></script>
+  <!-- 安卓：SAF 选择器不可直读，用系统 <input type=file> 拿字节后转存缓存 -->
+  <input id="pick-input" type="file" multiple class="hidden" />
 </body>
 </html>

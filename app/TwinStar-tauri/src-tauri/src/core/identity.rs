@@ -79,7 +79,13 @@ impl DeviceIdentity {
     // ------------------------------------------------------------ 持久化
 
     fn file_path() -> Option<PathBuf> {
-        dirs::data_dir().map(|d| d.join("TwinStar").join("device_identity.json"))
+        // Android 上 dirs 全返 None，退到应用私有目录，保证连接码跨重启稳定。
+        Some(
+            dirs::data_dir()
+                .unwrap_or_else(crate::core::path::android_app_files_dir)
+                .join("TwinStar")
+                .join("device_identity.json"),
+        )
     }
 
     /// 从应用数据目录加载身份；不存在则生成并持久化（损坏则备份重建）。

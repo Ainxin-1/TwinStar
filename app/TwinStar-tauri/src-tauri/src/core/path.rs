@@ -11,6 +11,11 @@ pub fn android_app_files_dir() -> PathBuf {
     PathBuf::from("/data/data/com.ainxin.twinstar/files")
 }
 
+/// 安卓配置目录（与接收目录彻底分离：settings.json / device_identity.json 不出现在"我的文件"里）。
+pub fn android_config_dir() -> PathBuf {
+    android_app_files_dir().join("config")
+}
+
 /// 相对路径总长度上限（4 KiB）。
 pub const MAX_RELATIVE_PATH_LENGTH: usize = 4096;
 /// 单个路径组件（文件/目录名）长度上限。

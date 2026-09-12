@@ -79,11 +79,11 @@ impl DeviceIdentity {
     // ------------------------------------------------------------ 持久化
 
     fn file_path() -> Option<PathBuf> {
-        // Android 上 dirs 全返 None，退到应用私有目录，保证连接码跨重启稳定。
+        // Android 上 dirs 全返 None，退到应用私有 config 目录（与接收目录分离），
+        // 保证连接码跨重启稳定。
         Some(
             dirs::data_dir()
-                .unwrap_or_else(crate::core::path::android_app_files_dir)
-                .join("TwinStar")
+                .unwrap_or_else(crate::core::path::android_config_dir)
                 .join("device_identity.json"),
         )
     }

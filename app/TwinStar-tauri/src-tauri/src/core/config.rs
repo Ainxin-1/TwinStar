@@ -49,9 +49,10 @@ pub fn validate_nickname(raw: &str) -> Result<String, String> {
 
 impl Config {
     fn file_path() -> Option<PathBuf> {
-        // Android 上 dirs 系列全部返回 None，退到应用私有目录（同 identity）。
-        let base = dirs::config_dir().unwrap_or_else(crate::core::path::android_app_files_dir);
-        Some(base.join("TwinStar").join("settings.json"))
+        // Android 上 dirs 系列全部返回 None，退到应用私有 config 目录。
+        // 注意：不要放进接收目录（TwinStar），否则 settings.json 会出现在"我的文件"里。
+        let base = dirs::config_dir().unwrap_or_else(crate::core::path::android_config_dir);
+        Some(base.join("settings.json"))
     }
 
     pub fn load() -> Self {

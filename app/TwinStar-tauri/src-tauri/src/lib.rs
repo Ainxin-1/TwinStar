@@ -1303,6 +1303,48 @@ pub fn run() {
     let _ = SAVE_DIR.set(Arc::new(Mutex::new(initial_save_dir)));
     let _ = NICKNAME.set(Arc::new(Mutex::new(initial_cfg.nickname)));
 
+    // 安卓一次性迁移：老版本把 settings.json / device_identity.json 放进了
+    // 接收目录（内部存储 files/TwinStar），且 download_dir 指向那里——导致
+    // 配置文件混进"我的文件"、换新目录后旧收件看不到。统一迁到：
+    //   配置 → 内部 files/config/，接收文件 → 外部专用目录。
+    #[cfg(target_os = "android")]
+    {
+        let old_dir = crate::core::path::android_app_files_dir().join("TwinStar");
+        if old_dir.is_dir() {
+            let new_cfg = crate::core::path::android_config_dir();
+            let _ = std::fs::create_dir_all(&new_cfg);
+            let new_save = default_save_dir();
+            let _ = std::fs::create_dir_all(&new_save);
+            if let Ok(rd) = std::fs::read_dir(&old_dir) {
+                for entry in rd.flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let dest = match name.as_str() {
+                        "settings.json" | "device_identity.json" => new_cfg.join(&name),
+                        _ => std::path::Path::new(&new_save).join(&name),
+                    };
+                    if !dest.exists() {
+                        let _ = std::fs::rename(entry.path(), &dest);
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir(&old_dir); // 空了才删得掉，无妨
+            // download_dir 指向旧内部目录的一律纠正为外部目录
+            let mut cfg = Config::load();
+            let stale = cfg
+                .download_dir
+                .as_deref()
+                .map(|d| d.starts_with("/data/data/"))
+                .unwrap_or(false);
+            if stale {
+                cfg.download_dir = Some(new_save.clone());
+                let _ = cfg.save();
+                if let Some(d) = SAVE_DIR.get() {
+                    *d.lock().unwrap() = new_save;
+                }
+            }
+        }
+    }
+
     #[allow(unused_mut)]
     let mut builder = tauri::Builder::default();
     // 单实例守护（任务书阶段 3）：双开时第二个进程把 argv 转给首实例后自动退出，

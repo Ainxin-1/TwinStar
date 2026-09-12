@@ -37,7 +37,7 @@
     <section id="page-transfer" class="page" data-page-node-id="k8mcBo7AF5jsE6xU651Tfv">
       <div class="card" data-page-node-id="OnqaChhiXup7Z47sAx6NME">
         <div class="card-row" data-page-node-id="CFJg5OLm884IW75nvszrLh">
-          <div class="card-title" data-page-node-id="XUkmKdzFGRAOV6PPkTKBDW">我的连接码</div>
+          <div class="card-title" data-page-node-id="XUkmDzFGRAOV6PPkTKBDW">我的连接码</div>
           <div class="card-actions" data-page-node-id="FyLgEPmkuizguBRYqG9Lt4">
             <span id="my-id" class="id-short" title="" data-page-node-id="D1SnPiPbDAWhOXzDro5iWs">— —</span>
             <button id="btn-copy" class="btn btn-primary btn-sm" disabled data-page-node-id="hMXUXt93rguKQHggHpZMXf">复制</button>
@@ -45,6 +45,12 @@
           </div>
         </div>
         <div class="field-hint" data-page-node-id="FyLgEPmkuizguBRYqG9Lt5">普通码靠网络发现对方；跨网连不上时，双方都改用「带地址」的码再试一次。</div>
+        <div class="nick-row">
+          <span class="field-label">我的昵称</span>
+          <input id="nickname-input" class="text-input nick-input" type="text" maxlength="48" placeholder="对方将看到这个名字" spellcheck="false" />
+          <button id="btn-nickname-save" class="btn btn-ghost btn-sm">改名</button>
+        </div>
+        <div class="field-hint">昵称会显示在对方的接收确认弹窗和设备列表里，改完 3 秒内生效。</div>
       </div>
 
       <div class="card" data-page-node-id="LdRm7l2vuooDXQsYjCKBX5">
@@ -128,6 +134,7 @@
           <div class="card-title" data-page-node-id="GNkDer1v8GuQOIW8IhhYGA">活动日志</div>
           <div class="card-actions" data-page-node-id="QPii94HXc94nQ3lMY5OMHz">
             <span id="log-count" class="pill pill-blue" data-page-node-id="0lGD0dxW77008DTHXeWU9M">0 条</span>
+            <button id="btn-export-log" class="btn btn-ghost btn-sm" data-page-node-id="T8UXVo2BG86tCFUJIIRuGh2">导出</button>
             <button id="btn-clear" class="btn btn-ghost btn-sm" data-page-node-id="T8UXVo2BG86tCFUJIIRuGh">清空</button>
           </div>
         </div>
@@ -164,7 +171,7 @@
       <span id="status-dot" class="dot dot-gray" data-page-node-id="5OxtQIKHArGyF5KPnsTMOL"></span>
       <span id="status-text" data-page-node-id="CwKN4loM5Ll3pVsH3hrXwk">正在建立网络…</span>
     </div>
-    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.11.0</span>
+    <span class="version" data-page-node-id="DkWyp7reGMjjGvKvguKDef">v0.12.0</span>
   </footer>
 
   <!-- 接收确认弹窗 -->
@@ -181,6 +188,25 @@
         <button id="btn-recv-allow" class="btn btn-primary btn-lg">接 收</button>
       </div>
       <div class="field-hint">不确定对方是谁就选「拒绝」——拒绝不会写入任何文件。</div>
+    </div>
+  </div>
+
+  <!-- 首启引导弹窗（仅首次使用时出现） -->
+  <div id="onboard-modal" class="modal-backdrop hidden">
+    <div class="modal">
+      <div class="modal-title">☄ 欢迎使用 TwinStar</div>
+      <div class="onboard-steps">
+        <div class="onboard-step"><b>1 · 复制你的连接码</b>发给对方（微信 / 邮件都行）</div>
+        <div class="onboard-step"><b>2 · 粘贴对方连接码</b>，拖入文件点「发送」</div>
+        <div class="onboard-step"><b>3 · 对方确认后</b>文件自动保存，全程加密直连</div>
+      </div>
+      <label class="field-label">给自己的设备起个名字</label>
+      <input id="onboard-nickname" class="text-input" type="text" maxlength="48" placeholder="如：办公室台式机" spellcheck="false" />
+      <div class="field-hint">这个名字会显示在对方的确认弹窗里；之后随时可在传输页改名。</div>
+      <div class="btn-row">
+        <button id="btn-onboard-skip" class="btn btn-ghost btn-lg">跳过</button>
+        <button id="btn-onboard-done" class="btn btn-primary btn-lg">开始使用</button>
+      </div>
     </div>
   </div>
 

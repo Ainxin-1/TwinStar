@@ -47,6 +47,7 @@ const PATH_POLL: Duration = Duration::from_secs(1);
 // ---------------- 全局状态 ----------------
 
 static SAVE_DIR: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
+static NICKNAME: OnceLock<Arc<Mutex<String>>> = OnceLock::new();
 static ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
 /// 取消标志。UI 同一时刻只有一个传输在跑，一把全局开关足够。
 static CANCEL: OnceLock<Arc<AtomicBool>> = OnceLock::new();
@@ -63,6 +64,11 @@ fn pending_recv() -> &'static Mutex<HashMap<String, tokio::sync::oneshot::Sender
 
 fn save_dir() -> Arc<Mutex<String>> {
     SAVE_DIR.get().unwrap().clone()
+}
+
+/// 本机昵称的内存源：disc 广播与发送元数据都从这里取，改名即时生效。
+fn nickname_cell() -> Arc<Mutex<String>> {
+    NICKNAME.get().unwrap().clone()
 }
 
 fn conn_cache() -> Arc<Mutex<HashMap<String, Connection>>> {
@@ -192,7 +198,7 @@ const RECV_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// 本机昵称（发送时编进元数据）。
 fn nickname() -> String {
-    Config::load().nickname
+    nickname_cell().lock().unwrap().clone()
 }
 
 /// 构造接收确认门：已信任设备直接放行；陌生设备发 `recv-request` 事件弹窗，
@@ -780,6 +786,63 @@ fn get_save_dir() -> String {
     save_dir().lock().unwrap().clone()
 }
 
+/// 当前昵称（前端昵称编辑框的初始值）。
+#[tauri::command]
+fn get_nickname() -> String {
+    nickname()
+}
+
+/// 改昵称：校验后写内存源 + 持久化。广播与发送元数据下一个周期即用新名。
+#[tauri::command]
+fn set_nickname(name: String) -> Result<(), String> {
+    let name = core::config::validate_nickname(&name)?;
+    *nickname_cell().lock().unwrap() = name.clone();
+    let cfg = Config {
+        nickname: name.clone(),
+        ..Config::load()
+    };
+    cfg.save()?;
+    Ok(())
+}
+
+/// 是否仍需展示首启引导（首次使用 = settings.json 还没落盘过）。
+#[tauri::command]
+fn get_onboarding() -> bool {
+    !Config::load().onboarded
+}
+
+/// 首启引导完成。名字可选一并保存（用户可能不起名直接跳过）。
+#[tauri::command]
+fn complete_onboarding(name: Option<String>) -> Result<(), String> {
+    let mut cfg = Config::load();
+    if let Some(n) = name {
+        let n = core::config::validate_nickname(&n)?;
+        *nickname_cell().lock().unwrap() = n.clone();
+        cfg.nickname = n;
+    }
+    cfg.onboarded = true;
+    cfg.save()
+}
+
+/// 把当前活动日志导出成文本文件（用户经保存对话框选择位置）。
+/// 文件名由前端按本地时间生成，后端不引日期库。
+#[tauri::command]
+fn export_log(text: String, file_name: String) -> Result<Option<String>, String> {
+    let Some(path) = rfd::FileDialog::new()
+        .set_title("导出活动日志")
+        .set_file_name(file_name)
+        .add_filter("文本文件", &["txt"])
+        .save_file()
+    else {
+        return Ok(None); // 用户取消，不算错误
+    };
+    // 带 BOM 的 UTF-8：老版记事本也能正确识别中文。
+    let mut bytes = vec![0xEF, 0xBB, 0xBF];
+    bytes.extend_from_slice(text.as_bytes());
+    std::fs::write(&path, bytes).map_err(|e| format!("写入失败：{e}"))?;
+    Ok(Some(path.display().to_string()))
+}
+
 #[tauri::command]
 fn start_send(app: AppHandle, peer_id: String, files: Vec<SendItem>) -> Result<(), String> {
     let Some(endpoint) = ENDPOINT.get() else {
@@ -973,11 +1036,13 @@ fn reveal_file(app: AppHandle, name: String) -> Result<(), String> {
 
 fn main() {
     // 接收目录：优先用上次持久化的选择（目录仍存在才用），否则默认 Downloads。
-    let initial_save_dir = Config::load()
+    let initial_cfg = Config::load();
+    let initial_save_dir = initial_cfg
         .download_dir
         .filter(|d| std::path::Path::new(d).is_dir())
         .unwrap_or_else(default_save_dir);
     let _ = SAVE_DIR.set(Arc::new(Mutex::new(initial_save_dir)));
+    let _ = NICKNAME.set(Arc::new(Mutex::new(initial_cfg.nickname)));
 
     tauri::Builder::default()
         // 单实例守护（任务书阶段 3）：双开时第二个进程把 argv 转给首实例后自动退出，
@@ -1001,11 +1066,12 @@ fn main() {
 
                             // 局域网设备发现：广播本机连接码 + 昵称 + 直连地址，
                             // 收同网段的其他 TwinStar（点一下即直连，不走发现服务）。
+                            // 昵称传内存源：用户改名后下一轮广播（≤3s）即生效。
                             let ep_for_disc = endpoint.clone();
                             disc::start(
                                 handle.clone(),
                                 id.clone(),
-                                Config::load().nickname,
+                                nickname_cell(),
                                 std::sync::Arc::new(move || net::publicable_addrs(&ep_for_disc)),
                             );
 
@@ -1055,6 +1121,11 @@ fn main() {
             respond_recv_request,
             my_addr_code,
             get_save_dir,
+            get_nickname,
+            set_nickname,
+            get_onboarding,
+            complete_onboarding,
+            export_log,
             list_files,
             open_file,
             open_folder,

@@ -42,7 +42,20 @@ function GitText([string[]]$GitArgs) {
     [Text.Encoding]::UTF8.GetString((GitBytes $GitArgs))
 }
 
-if (-not (Test-Path $TokenFile)) { throw "Token file not found: $TokenFile (run git credential fill first)" }
+if (-not (Test-Path $TokenFile)) {
+    # get token straight from GCM (silent once stored in Windows Credential Manager;
+    # pops the browser auth dialog only on first ever use). Start-Process avoids the
+    # bash-wrapper `<` redirection mangling that breaks `git credential fill`.
+    $ask = "$env:TEMP\ts_ask.txt"
+    [IO.File]::WriteAllText($ask, "protocol=https`nhost=github.com`n")
+    $credOut = "$env:TEMP\ts_cred.txt"
+    $credErr = "$env:TEMP\ts_cred_err.txt"
+    $env:PATH += ";$env:ProgramFiles\Git\cmd;$env:ProgramFiles\Git\bin"
+    $gcm = "$env:ProgramFiles\Git\mingw64\bin\git-credential-manager.exe"
+    if (-not (Test-Path $gcm)) { throw "git-credential-manager.exe not found at $gcm" }
+    Start-Process -FilePath $gcm -ArgumentList "get" -RedirectStandardInput $ask `
+        -RedirectStandardOutput $credOut -RedirectStandardError $credErr -Wait -NoNewWindow
+}
 $raw = [IO.File]::ReadAllText($TokenFile)
 if ($raw -notmatch 'password=(\S+)') { throw "no password= line in token file" }
 $token = $Matches[1]

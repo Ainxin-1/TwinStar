@@ -371,3 +371,30 @@ body { display: flex; flex-direction: column; }
 .modal .btn-row { display: flex; gap: 10px; }
 .modal .btn-row .btn { flex: 1; }
 .modal .field-hint { margin-top: 12px; }
+
+/* ── 昵称编辑行 ── */
+.nick-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.nick-row .field-label { flex: none; }
+.nick-input {
+  flex: 1;
+  padding: 6px 10px;
+  font-size: 12.5px;
+  font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+  width: auto;
+}
+
+/* ── 首启引导 ── */
+.onboard-steps {
+  display: flex; flex-direction: column; gap: 9px;
+  margin-bottom: 14px;
+}
+.onboard-step {
+  font-size: 12.5px; line-height: 1.7;
+  color: var(--text);
+  background: var(--field);
+  border-radius: 8px;
+  padding: 8px 12px;
+}
+.onboard-step b { color: var(--primary); }

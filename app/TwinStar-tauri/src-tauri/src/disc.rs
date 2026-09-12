@@ -80,8 +80,11 @@ impl Registry {
 /// 而是每次广播前问调用方要最新的。
 type AddrSource = Arc<dyn Fn() -> Vec<SocketAddr> + Send + Sync>;
 
+/// 昵称同理：用户可能中途改名，每轮广播前取当前值，3 秒内全网段可见。
+pub type NameSource = Arc<Mutex<String>>;
+
 /// 启动发现。任何一步失败都只记日志、不向上抛，避免拖垮整个网络初始化。
-pub fn start(app: AppHandle, my_id: String, my_name: String, addrs: AddrSource) {
+pub fn start(app: AppHandle, my_id: String, my_name: NameSource, addrs: AddrSource) {
     tauri::async_runtime::spawn(async move {
         if let Err(e) = run(app.clone(), my_id, my_name, addrs).await {
             let _ = app.emit("log", format!("ℹ️ 局域网发现未启用：{e:#}"));
@@ -92,7 +95,7 @@ pub fn start(app: AppHandle, my_id: String, my_name: String, addrs: AddrSource) 
 async fn run(
     app: AppHandle,
     my_id: String,
-    my_name: String,
+    my_name: NameSource,
     addrs: AddrSource,
 ) -> Result<()> {
     let socket = std::sync::Arc::new(UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT)).await?);
@@ -131,6 +134,7 @@ async fn run(
     tauri::async_runtime::spawn(async move {
         loop {
             let addrs: Vec<String> = addrs().iter().map(|a| a.to_string()).collect();
+            let my_name = my_name.lock().unwrap().clone();
             let announce =
                 serde_json::json!({ "magic": MAGIC, "id": my_id, "name": my_name, "addrs": addrs });
             if let Ok(payload) = serde_json::to_vec(&announce) {

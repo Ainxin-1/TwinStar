@@ -91,10 +91,14 @@ function showResult(msg, ok) {
 }
 
 function addLog(line) {
-  logLines.push(line);
+  const t = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamped =
+    `[${pad(t.getHours())}:${pad(t.getMinutes())}:${pad(t.getSeconds())}] ` + line;
+  logLines.push(stamped);
   if (logLines.length > 200) logLines.shift();
   const div = document.createElement("div");
-  div.textContent = line;
+  div.textContent = stamped;
   logList.appendChild(div);
   logList.scrollTop = logList.scrollHeight;
   logCount.textContent = logLines.length + " 条";
@@ -631,9 +635,99 @@ $("btn-refresh-devices").addEventListener("click", () => {
 
 listen("devices", (e) => renderDevices(e.payload));
 
-// ── 日志清空 ──
+// ── 日志清空 / 导出 ──
 $("btn-clear").addEventListener("click", () => {
   logLines = [];
   logList.innerHTML = "";
   logCount.textContent = "0 条";
 });
+
+$("btn-export-log").addEventListener("click", async () => {
+  if (!logLines.length) {
+    addLog("没有日志可导出");
+    return;
+  }
+  const t = new Date();
+  const pad = (n) => String(n).padStart(2, "0");
+  const stamp =
+    t.getFullYear() + pad(t.getMonth() + 1) + pad(t.getDate()) +
+    "-" + pad(t.getHours()) + pad(t.getMinutes()) + pad(t.getSeconds());
+  const header =
+    "TwinStar 活动日志\r\n" +
+    "导出时间：" + t.toLocaleString() + "\r\n" +
+    "连接码短标识：" + (myId ? myId.slice(0, 8) : "—") + "…\r\n" +
+    "──────────────────────\r\n";
+  try {
+    const saved = await invoke("export_log", {
+      text: header + logLines.join("\r\n") + "\r\n",
+      fileName: `twinstar-log-${stamp}.txt`,
+    });
+    if (saved) addLog("日志已导出：" + saved);
+  } catch (e) {
+    addLog("日志导出失败：" + e);
+  }
+});
+
+// ── 昵称编辑 ──
+const nickInput = $("nickname-input");
+const btnNickSave = $("btn-nickname-save");
+
+async function loadNickname() {
+  try {
+    nickInput.value = await invoke("get_nickname");
+  } catch (e) {
+    addLog("读取昵称失败：" + e);
+  }
+}
+
+btnNickSave.addEventListener("click", async () => {
+  const name = nickInput.value;
+  try {
+    await invoke("set_nickname", { name });
+    addLog("昵称已改为「" + name.trim() + "」，局域网广播与发送元数据即将生效");
+    btnNickSave.textContent = "已保存";
+    setTimeout(() => (btnNickSave.textContent = "改名"), 1200);
+  } catch (e) {
+    addLog("昵称保存失败：" + e);
+  }
+});
+nickInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") btnNickSave.click();
+});
+
+// ── 首启引导 ──
+const onboardModal = $("onboard-modal");
+const onboardNick = $("onboard-nickname");
+
+async function maybeShowOnboarding() {
+  try {
+    if (!(await invoke("get_onboarding"))) return;
+    onboardModal.classList.remove("hidden");
+  } catch (e) {
+    addLog("读取引导状态失败：" + e);
+  }
+}
+
+async function finishOnboarding(withName) {
+  // 输入框是空的就当跳过处理，不用报错打断用户
+  const hasName = withName && onboardNick.value.trim().length > 0;
+  const name = hasName ? onboardNick.value : null;
+  try {
+    await invoke("complete_onboarding", { name });
+    onboardModal.classList.add("hidden");
+    addLog("✅ 首次使用引导完成，可以开始互传了");
+    nickInput.value = await invoke("get_nickname");
+  } catch (e) {
+    addLog("引导完成失败：" + e);
+  }
+}
+
+$("btn-onboard-done").addEventListener("click", () => finishOnboarding(true));
+$("btn-onboard-skip").addEventListener("click", () => finishOnboarding(false));
+onboardNick.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") finishOnboarding(true);
+});
+
+// ── 启动：昵称 + 首启引导 ──
+loadNickname();
+maybeShowOnboarding();

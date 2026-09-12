@@ -15,10 +15,12 @@ use iroh::{
 };
 use serde::Serialize;
 use std::net::{IpAddr, SocketAddr};
+#[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::time::{Duration, Instant};
 
-/// 拉起控制台程序（tasklist / ipconfig）时不弹黑框。
+/// 拉起控制台程序（tasklist / ipconfig）时不弹黑框。仅 Windows 需要。
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 /// 传输协议标识。**1.0 已冻结**（见 docs/ROADMAP-1.0.md）：任何线上语义变更
@@ -593,6 +595,7 @@ fn detect_vpn_tun() -> Option<String> {
     }
 }
 
+#[cfg(windows)]
 fn running_vpn_process() -> Option<String> {
     let out = std::process::Command::new("tasklist")
         .args(["/FO", "CSV", "/NH"])
@@ -606,6 +609,7 @@ fn running_vpn_process() -> Option<String> {
         .map(|p| p.to_string())
 }
 
+#[cfg(windows)]
 fn tun_adapter() -> Option<String> {
     let out = std::process::Command::new("ipconfig")
         .arg("/all")
@@ -618,6 +622,17 @@ fn tun_adapter() -> Option<String> {
         .iter()
         .find(|a| text.contains(*a))
         .map(|a| format!("虚拟网卡 {a}"))
+}
+
+/// 非 Windows 平台（Android / macOS / Linux）暂不做 TUN 探测，静默跳过。
+#[cfg(not(windows))]
+fn running_vpn_process() -> Option<String> {
+    None
+}
+
+#[cfg(not(windows))]
+fn tun_adapter() -> Option<String> {
+    None
 }
 
 #[cfg(test)]

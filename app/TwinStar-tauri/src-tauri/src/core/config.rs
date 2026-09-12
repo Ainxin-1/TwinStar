@@ -49,7 +49,11 @@ pub fn validate_nickname(raw: &str) -> Result<String, String> {
 
 impl Config {
     fn file_path() -> Option<PathBuf> {
-        dirs::config_dir().map(|d| d.join("TwinStar").join("settings.json"))
+        // Android 上 dirs 系列全部返回 None（无 XDG 概念），退到应用私有目录——
+        // 该路径由包名确定性推导，属于应用可写存储。
+        let base = dirs::config_dir()
+            .or_else(|| Some(PathBuf::from("/data/data/com.ainxin.twinstar/files")))?;
+        Some(base.join("TwinStar").join("settings.json"))
     }
 
     pub fn load() -> Self {
@@ -92,11 +96,30 @@ impl Config {
 }
 
 fn whoami_nickname() -> String {
-    std::env::var("COMPUTERNAME")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("USERNAME").ok().filter(|s| !s.is_empty()))
-        .unwrap_or_else(|| "用户".into())
+    #[cfg(windows)]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .or_else(|| std::env::var("USERNAME").ok().filter(|s| !s.is_empty()))
+            .unwrap_or_else(|| "用户".into())
+    }
+    #[cfg(not(windows))]
+    {
+        // macOS / Linux 有 USER；Android 没有，退到机型名（getprop），再不行就"用户"。
+        std::env::var("USER")
+            .ok()
+            .filter(|s| !s.is_empty() && s != "root")
+            .or_else(|| {
+                let out = std::process::Command::new("getprop")
+                    .arg("ro.product.model")
+                    .output()
+                    .ok()?;
+                let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if s.is_empty() { None } else { Some(s) }
+            })
+            .unwrap_or_else(|| "用户".into())
+    }
 }
 
 #[cfg(test)]

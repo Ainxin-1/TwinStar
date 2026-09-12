@@ -36,3 +36,6 @@ demo/iroh-transfer/recv_log*.txt
 release 产物残留
 
 demo/testfile_10mb.bin
+
+# ---- 安卓本地产物 ----
+demo/twinstar.apk

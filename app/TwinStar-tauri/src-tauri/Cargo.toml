@@ -43,5 +43,9 @@ base64 = "0.22"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 rfd = "0.17"
 
+# 安卓 JNI：打开接收文件（FileProvider + ACTION_VIEW）
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+
 [features]
 custom-protocol = ["tauri/custom-protocol"]

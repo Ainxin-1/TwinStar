@@ -565,12 +565,12 @@ function renderFiles(list) {
   }
   fileEmpty.classList.add("hidden");
 
-  // 安卓：explorer 定位不可用，"位置"改为在文件管理器里打开接收目录；
-  // "打开"走 opener Intent（FileProvider）。
+  // 安卓：explorer 定位不可用。"打开"走 FileProvider + 系统 Intent；
+  // "位置"提示文件所在目录（外部应用目录，文件管理器可直接浏览）。
   async function openReceived(name) {
     try {
       if (IS_ANDROID) {
-        await invoke("open_path", { path: currentSaveDir + "/" + name });
+        await invoke("open_received_file", { name });
       } else {
         await invoke("open_file", { name });
       }
@@ -598,12 +598,12 @@ function renderFiles(list) {
     const reveal = document.createElement("button");
     reveal.className = "row-action sub";
     reveal.textContent = "位置";
-    reveal.title = IS_ANDROID ? "在文件管理器中打开接收目录" : "在资源管理器中显示此文件";
+    reveal.title = IS_ANDROID ? "显示文件所在目录" : "在资源管理器中显示此文件";
     reveal.addEventListener("click", async (ev) => {
       ev.stopPropagation();
       try {
         if (IS_ANDROID) {
-          await invoke("open_path", { path: currentSaveDir });
+          addLog("📂 文件位于 " + currentSaveDir + "/" + f.name);
         } else {
           await invoke("reveal_file", { name: f.name });
         }
@@ -630,7 +630,7 @@ function renderFiles(list) {
 $("btn-open-folder").addEventListener("click", async () => {
   try {
     if (IS_ANDROID) {
-      await invoke("open_path", { path: currentSaveDir });
+      addLog("📂 接收目录：" + currentSaveDir + "（文件管理器中进入 Android/data/com.ainxin.twinstar/files/TwinStar）");
     } else {
       await invoke("open_folder");
     }

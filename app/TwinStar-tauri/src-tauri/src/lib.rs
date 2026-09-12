@@ -20,7 +20,9 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use iroh::{Endpoint, EndpointId, endpoint::Connection};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter};
+#[cfg(desktop)]
+use tauri::Manager;
 
 use crate::core::config::Config;
 use crate::core::identity::DeviceIdentity;
@@ -151,13 +153,13 @@ fn default_save_dir() -> String {
         .unwrap_or_else(|_| std::env::current_dir().unwrap_or_default().display().to_string())
 }
 
-/// Android：没有 Downloads 概念，落在应用私有目录下的 TwinStar 文件夹。
+/// Android：没有 Downloads 概念，落在**外部**应用专属目录
+/// （/storage/emulated/0/Android/data/<包名>/files/TwinStar）。
+/// 选外部而非内部的原因：无需任何权限即可被系统文件管理器浏览，
+/// 用户能自己拿到文件；配合 file_paths.xml 的 FileProvider 段可直接"打开"。
 #[cfg(not(windows))]
 fn default_save_dir() -> String {
-    crate::core::path::android_app_files_dir()
-        .join("TwinStar")
-        .display()
-        .to_string()
+    "/storage/emulated/0/Android/data/com.ainxin.twinstar/files/TwinStar".into()
 }
 
 // ---------------- 网络层 ----------------
@@ -859,6 +861,139 @@ fn open_path(app: AppHandle, path: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// 安卓：用 FileProvider + 系统 Intent 打开接收目录里的文件。
+/// 上游 opener 插件的 open_path 在安卓上损坏（发给 Kotlin 裸字符串），
+/// 这里绕开它自己走 JNI。
+#[cfg(target_os = "android")]
+#[tauri::command]
+fn open_received_file(
+    app: AppHandle,
+    webview: tauri::Webview,
+    name: String,
+) -> Result<(), String> {
+    let dir = save_dir().lock().unwrap().clone();
+    // 防穿越：只允许纯文件名（无路径分隔符）。
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err("非法文件名".into());
+    }
+    let full = std::path::Path::new(&dir).join(&name);
+    if !full.is_file() {
+        return Err(format!("文件不存在：{name}"));
+    }
+    let path_str = full.display().to_string();
+    let app_for_cb = app.clone();
+
+    webview
+        .with_webview(move |platform| {
+            let jh = platform.jni_handle();
+            jh.exec(move |env, activity, _| {
+                let result: Result<(), String> = (|| {
+                    let jpath = env
+                        .new_string(&path_str)
+                        .map_err(|e| format!("new_string: {e}"))?;
+                    let file_cls = env
+                        .find_class("java/io/File")
+                        .map_err(|e| format!("find File: {e}"))?;
+                    let jfile = env
+                        .new_object(
+                            &file_cls,
+                            "(Ljava/lang/String;)V",
+                            &[jni::objects::JValue::Object(&jpath)],
+                        )
+                        .map_err(|e| format!("new File: {e}"))?;
+                    let jauthority = env
+                        .new_string("com.ainxin.twinstar.fileprovider")
+                        .map_err(|e| format!("new_string: {e}"))?;
+                    let fp_cls = env
+                        .find_class("androidx/core/content/FileProvider")
+                        .map_err(|e| format!("find FileProvider: {e}"))?;
+                    let juri = env
+                        .call_static_method(
+                            &fp_cls,
+                            "getUriForFile",
+                            "(Landroid/content/Context;Ljava/lang/String;Ljava/io/File;)Landroid/net/Uri;",
+                            &[
+                                jni::objects::JValue::Object(activity),
+                                jni::objects::JValue::Object(&jauthority),
+                                jni::objects::JValue::Object(&jfile),
+                            ],
+                        )
+                        .map_err(|e| format!("getUriForFile: {e}"))?
+                        .l()
+                        .map_err(|e| format!("uri: {e}"))?;
+                    let jmime = env
+                        .new_string(mime_for(&name))
+                        .map_err(|e| format!("new_string: {e}"))?;
+                    let intent = env
+                        .new_object("android/content/Intent", "()V", &[])
+                        .map_err(|e| format!("new Intent: {e}"))?;
+                    env.call_method(
+                        &intent,
+                        "setDataAndType",
+                        "(Landroid/net/Uri;Ljava/lang/String;)Landroid/content/Intent;",
+                        &[jni::objects::JValue::Object(&juri), jni::objects::JValue::Object(&jmime)],
+                    )
+                    .map_err(|e| format!("setDataAndType: {e}"))?;
+                    // FLAG_GRANT_READ_URI_PERMISSION = 1
+                    env.call_method(
+                        &intent,
+                        "addFlags",
+                        "(I)Landroid/content/Intent;",
+                        &[jni::objects::JValue::Int(1)],
+                    )
+                    .map_err(|e| format!("addFlags: {e}"))?;
+                    env.call_method(
+                        activity,
+                        "startActivity",
+                        "(Landroid/content/Intent;)V",
+                        &[jni::objects::JValue::Object(&intent)],
+                    )
+                    .map_err(|e| format!("startActivity: {e}"))?;
+                    Ok(())
+                })();
+
+                if let Err(e) = result {
+                    let _ = env.exception_clear();
+                    let _ = app_for_cb.emit("log", format!("❌ 打开失败：{e}"));
+                }
+            });
+        })
+        .map_err(|e| format!("with_webview: {e}"))?;
+    Ok(())
+}
+
+/// 桌面版同入口：转发到 open_file。
+#[cfg(not(target_os = "android"))]
+#[tauri::command]
+fn open_received_file(app: AppHandle, webview: tauri::Webview, name: String) -> Result<(), String> {
+    let _ = webview;
+    open_file(app, name)
+}
+
+/// 按扩展名粗略猜 MIME（打开文件用，猜不出给通用类型）。
+#[cfg(target_os = "android")]
+fn mime_for(name: &str) -> String {
+    let ext = name.rsplit('.').next().unwrap_or("").to_lowercase();
+    match ext.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "mp4" => "video/mp4",
+        "mkv" => "video/x-matroska",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "pdf" => "application/pdf",
+        "txt" | "log" | "json" | "md" => "text/plain",
+        "zip" => "application/zip",
+        "apk" => "application/vnd.android.package-archive",
+        "doc" | "docx" => "application/msword",
+        "xls" | "xlsx" => "application/vnd.ms-excel",
+        _ => "application/octet-stream",
+    }
+    .to_string()
+}
+
 /// 把前端拾取到的文件字节落进应用缓存目录，返回可供传输层读取的路径。
 /// 安卓 SAF 选择器给的是 content:// URI，Rust 无法直接读，前端用
 /// `<input type=file>` 拿到字节后经本命令转存。
@@ -1267,6 +1402,7 @@ pub fn run() {
             export_log,
             list_files,
             open_file,
+            open_received_file,
             open_folder,
             reveal_file
         ])

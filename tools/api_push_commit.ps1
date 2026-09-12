@@ -153,7 +153,10 @@ foreach ($line in ($diffText -split "`n" | Where-Object { $_.Trim() })) {
         $exists = $true
         try { Api GET "$api/git/blobs/$blobSha" $null | Out-Null } catch { $exists = $false }
         if (-not $exists) {
-            $b64 = [Convert]::ToBase64String((GitBytes @("cat-file", "blob", $blobSha)))
+            $bytes = GitBytes @("cat-file", "blob", $blobSha)
+            # PS 把空 byte[] 传给 .NET 方法会变 null（空文件场景）
+            if ($null -eq $bytes) { $bytes = [byte[]]@() }
+            $b64 = [Convert]::ToBase64String($bytes)
             $newBlob = Api POST "$api/git/blobs" @{ content = $b64; encoding = "base64" }
             if ($newBlob.sha -ne $blobSha) { throw "blob SHA mismatch: remote $($newBlob.sha) != local $blobSha ($path)" }
             Write-Host "  uploaded blob $blobSha ($path)"

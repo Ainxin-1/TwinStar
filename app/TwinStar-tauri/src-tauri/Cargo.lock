@@ -6433,6 +6433,7 @@ dependencies = [
  "hex",
  "hkdf",
  "iroh",
+ "jni 0.21.1",
  "rand 0.8.8",
  "rfd 0.17.2",
  "serde",

@@ -62,6 +62,9 @@ const PART_SUFFIX: &str = ".part";
 
 // ---------------------------------------------------------------- 元数据
 
+/// 传输元数据。**1.0 已冻结**（见 docs/ROADMAP-1.0.md）：
+/// 字段集 / 序列化形态的任何变更都破坏跨版本互通，必须随 ALPN 一起 bump。
+/// 新增可选字段只能以 `#[serde(default)]` 追加，保证旧接收端可忽略、旧发送端可缺省。
 #[derive(Serialize, Deserialize)]
 pub struct FileMeta {
     pub name: String,
@@ -997,6 +1000,20 @@ mod tests {
             pick.ip()
         };
         EndpointAddr::from_parts(ep.id(), [TransportAddr::Ip(SocketAddr::new(ip, pick.port()))])
+    }
+
+    /// 协议冻结钉子（1.0，见 docs/ROADMAP-1.0.md）：这些线上常量一旦漂移，
+    /// 不同版本之间会悄悄失去互通。改动任何一个都必须 bump ALPN 到 `twinstar/2`，
+    /// 并同步 README 兼容性说明——届时本测试也会挂，正好逼着改。
+    #[test]
+    fn protocol_freeze_pins_wire_constants() {
+        assert_eq!(crate::net::ALPN, b"twinstar/1");
+        assert_eq!(PARALLEL_ACCEPTED, 1u64 << 63, "并行接收能力位");
+        assert_eq!(REJECTED, 1u64 << 62, "接收方拒绝位");
+        assert_eq!(CHUNK, 1024 * 1024, "读写块");
+        assert_eq!(PARALLEL_THRESHOLD, 16 * 1024 * 1024, "并行分块门槛");
+        assert_eq!(PARALLEL_CHUNKS, 4, "并行路数");
+        assert_eq!(FULL_HASH_LIMIT, 64 * 1024 * 1024, "全量哈希上限");
     }
 
     #[test]

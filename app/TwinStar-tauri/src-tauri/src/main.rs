@@ -20,7 +20,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use iroh::{Endpoint, EndpointId, endpoint::Connection};
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::core::config::Config;
 use crate::core::identity::DeviceIdentity;
@@ -980,6 +980,14 @@ fn main() {
     let _ = SAVE_DIR.set(Arc::new(Mutex::new(initial_save_dir)));
 
     tauri::Builder::default()
+        // 单实例守护（任务书阶段 3）：双开时第二个进程把 argv 转给首实例后自动退出，
+        // 首实例把已有窗口从最小化/后台拉回前台。官方要求该插件先于其他插件注册。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
+                let _ = w.set_focus();
+            }
+        }))
         .setup(|app| {
             let handle = app.handle().clone();
             std::thread::spawn(move || {

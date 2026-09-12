@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 /// 拉起控制台程序（tasklist / ipconfig）时不弹黑框。
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 
+/// 传输协议标识。**1.0 已冻结**（见 docs/ROADMAP-1.0.md）：任何线上语义变更
+/// 必须 bump 到 `twinstar/2` 并同步 README 兼容性说明，否则跨版本悄悄失去互通。
 pub const ALPN: &[u8] = b"twinstar/1";
 
 /// 打洞等待上限：给 QUIC 一点时间从"中继先行"升级到"直连"，
